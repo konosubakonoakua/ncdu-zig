@@ -1,0 +1,77 @@
+# SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+# SPDX-License-Identifier: MIT
+
+2.3 - 2023-08-04
+	- Now requires Zig 0.11
+	- Add --(enable|disable)-natsort options
+	- Add indicator to apparent size/disk usage selection in the footer
+	- Fix build on armv7l (hopefully)
+	- Minor build system additions
+
+2.2.2 - 2023-01-19
+	- Now requires Zig 0.10 or 0.10.1
+	- That's it, pretty much.
+
+2.2.1 - 2022-10-25
+	- Still requires Zig 0.9.0 or 0.9.1
+	- Fix bug with 'dark' and 'off' color themes on FreeBSD and MacOS
+
+2.2 - 2022-10-17
+	- Still requires Zig 0.9.0 or 0.9.1
+	- (breaking) Wildcards in exclude patterns don't cross directory boundary anymore
+	- Improve exclude pattern matching performance
+	- Set full background in default dark-bg color scheme
+	- Fix broken JSON export when a filename contains control characters below 0x10
+
+2.1.2 - 2022-04-28
+	- Still requires Zig 0.9.0 or 0.9.1
+	- Fix possible crash on shortening file names with unicode variation
+	  selectors or combining marks
+
+2.1.1 - 2022-03-25
+	- Still requires Zig 0.9.0 or 0.9.1
+	- Fix potential crash when refreshing
+	- Fix typo in --graph-style=eighth-block
+	- Revert default --graph-style to hash characters
+
+2.1 - 2022-02-07
+	- Still requires Zig 0.9.0
+	- Use natural sort order when sorting by file name
+	- Use Unicode box drawing characters for the file size bar
+	- Add --graph-style option to change drawing style for the file size bar
+	- Fix early exit if a configuration directory does not exist
+	- Fix display glitch for long file names
+	- Fix display glitch with drawing unique/shared size column
+
+2.0.1 - 2022-01-01
+	- Still requires Zig 0.9.0
+	- Fix build failure to find 'wcwidth' on some systems
+	- Add ZIG_FLAGS option to Makefile
+
+2.0 - 2021-12-21
+	- Requires Zig 0.9.0
+	- That's the only change.
+
+2.0-beta3 - 2021-11-09
+	- Requires Zig 0.8 or 0.8.1
+	- Add lots of new CLI flags to configure ncdu
+	- Add configuration file support
+	- Add 'dark-bg' color scheme and use that by default
+	- Fix not enabling -x by default
+	- Fix export feature
+	- Fix import of "special" dirs and files
+	- Fix double-slash display in file browser
+
+2.0-beta2 - 2021-07-31
+	- Requires Zig 0.8
+	- Significantly reduce memory usage for hard links
+	- Slightly increase memory usage for directory entries
+	- Fix reporting of fatal errors in the -0 and -1 scanning UIs
+
+2.0-beta1 - 2021-07-22
+	- Full release announcement: https://dev.yorhel.nl/doc/ncdu2
+	- Requires Zig 0.8
+	- Features and UI based on ncdu 1.16
+	- Lower memory use in most scenarios (except with many hard links)
+	- Improved performance of hard link counting
+	- Extra column for shared/unique directory sizes
