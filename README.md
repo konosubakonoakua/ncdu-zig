@@ -6,6 +6,7 @@ SPDX-License-Identifier: MIT
 # ncdu-zig
 
 ## Description
+![ncdu screenshot](https://github.com/konosubakonoakua/ncdu-zig/releases/download/screenshots/ncdu.png)
 
 Ncdu is a disk usage analyzer with an ncurses interface. It is designed to find
 space hogs on a remote server where you don't have an entire graphical setup
