@@ -34,3 +34,7 @@ There's also a handy Makefile that supports the typical targets, e.g.:
 make
 sudo make install PREFIX=/usr
 ```
+
+## Caution
+> [!IMPORTANT]
+> This repo is upload from https://dev.yorhel.nl/ncdu, maybe diverged from the origin.
