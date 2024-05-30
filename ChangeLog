@@ -1,5 +1,11 @@
-# SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+# SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
+
+2.4 - 2024-04-21
+	- Now requires Zig 0.12
+	- Revert default color scheme back to 'off'
+	- Rewrite man page in mdoc, drop pod2man dependency
+	- Fix updating parent dir error status on refresh
 
 2.3 - 2023-08-04
 	- Now requires Zig 0.11

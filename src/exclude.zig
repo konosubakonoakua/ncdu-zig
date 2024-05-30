@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
@@ -56,7 +56,7 @@ const Pattern = struct {
 
     fn parse(pat_: []const u8) *const Pattern {
         var pat = std.mem.trimLeft(u8, pat_, "/");
-        var top = main.allocator.create(Pattern) catch unreachable;
+        const top = main.allocator.create(Pattern) catch unreachable;
         var tail = top;
         tail.sub = null;
         while (std.mem.indexOfScalar(u8, pat, '/')) |idx| {
@@ -147,7 +147,7 @@ fn PatternList(comptime withsub: bool) type {
         fn append(self: *Self, pat: *const Pattern) void {
             std.debug.assert((pat.sub != null) == withsub);
             if (pat.isliteral) {
-                var e = self.literals.getOrPut(main.allocator, pat) catch unreachable;
+                const e = self.literals.getOrPut(main.allocator, pat) catch unreachable;
                 if (!e.found_existing) {
                     e.key_ptr.* = pat;
                     e.value_ptr.* = if (withsub) .{} else {};
@@ -250,16 +250,16 @@ pub fn getPatterns(path_: []const u8) Patterns {
     var pat = root;
     defer pat.deinit();
     while (std.mem.indexOfScalar(u8, path, '/')) |idx| {
-        var name = main.allocator.dupeZ(u8, path[0..idx]) catch unreachable;
+        const name = main.allocator.dupeZ(u8, path[0..idx]) catch unreachable;
         defer main.allocator.free(name);
         path = path[idx+1..];
 
-        var sub = pat.enter(name);
+        const sub = pat.enter(name);
         pat.deinit();
         pat = sub;
     }
 
-    var name = main.allocator.dupeZ(u8, path) catch unreachable;
+    const name = main.allocator.dupeZ(u8, path) catch unreachable;
     defer main.allocator.free(name);
     return pat.enter(name);
 }

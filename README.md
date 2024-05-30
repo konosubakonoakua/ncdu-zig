@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 SPDX-License-Identifier: MIT
 -->
 
@@ -20,7 +20,7 @@ C version (1.x).
 
 ## Requirements
 
-- Zig 0.11.0
+- Zig 0.12.0
 - Some sort of POSIX-like OS
 - ncurses libraries and header files
 

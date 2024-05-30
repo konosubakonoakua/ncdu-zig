@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
@@ -45,7 +45,7 @@ fn deleteItem(dir: std.fs.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry)
         return true;
 
     if (entry.dir()) |d| {
-        var fd = dir.openDirZ(path, .{.no_follow = true}, false) catch |e| return err(e);
+        var fd = dir.openDirZ(path, .{ .no_follow = true, .iterate = false }) catch |e| return err(e);
         var it = &d.sub;
         parent = d;
         defer parent = parent.parent.?;

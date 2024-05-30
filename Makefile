@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+# SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
 # Optional semi-standard Makefile with some handy tools.
@@ -9,12 +9,12 @@ ZIG ?= zig
 PREFIX ?= /usr/local
 BINDIR ?= ${PREFIX}/bin
 MANDIR ?= ${PREFIX}/share/man/man1
-ZIG_FLAGS ?= -Doptimize=ReleaseFast
+ZIG_FLAGS ?= --release
 
 NCDU_VERSION=$(shell grep 'program_version = "' src/main.zig | sed -e 's/^.*"\(.\+\)".*$$/\1/')
 
-.PHONY: build
-build: release doc
+.PHONY: build test
+build: release
 
 release:
 	$(ZIG) build ${ZIG_FLAGS}
@@ -25,21 +25,13 @@ debug:
 clean:
 	rm -rf zig-cache zig-out
 
-distclean: clean
-	rm -f ncdu.1
-
-doc: ncdu.1
-
-ncdu.1: ncdu.pod src/main.zig
-	pod2man --center "ncdu manual" --release "ncdu-${NCDU_VERSION}" ncdu.pod >ncdu.1
-
 install: install-bin install-doc
 
 install-bin: release
 	mkdir -p ${BINDIR}
 	install -m0755 zig-out/bin/ncdu ${BINDIR}/
 
-install-doc: doc
+install-doc:
 	mkdir -p ${MANDIR}
 	install -m0644 ncdu.1 ${MANDIR}/
 
@@ -52,10 +44,10 @@ uninstall-bin:
 uninstall-doc:
 	rm -f ${MANDIR}/ncdu.1
 
-dist: doc
+dist:
 	rm -f ncdu-${NCDU_VERSION}.tar.gz
 	mkdir ncdu-${NCDU_VERSION}
-	for f in ncdu.1 `git ls-files | grep -v ^\.gitignore`; do mkdir -p ncdu-${NCDU_VERSION}/`dirname $$f`; ln -s "`pwd`/$$f" ncdu-${NCDU_VERSION}/$$f; done
+	for f in `git ls-files | grep -v ^\.gitignore`; do mkdir -p ncdu-${NCDU_VERSION}/`dirname $$f`; ln -s "`pwd`/$$f" ncdu-${NCDU_VERSION}/$$f; done
 	tar -cophzf ncdu-${NCDU_VERSION}.tar.gz --sort=name ncdu-${NCDU_VERSION}
 	rm -rf ncdu-${NCDU_VERSION}
 
@@ -73,14 +65,14 @@ static-%.tar.gz:
 		CC="${ZIG} cc --target=$*"\
 		LD="${ZIG} cc --target=$*"\
 		AR="${ZIG} ar" RANLIB="${ZIG} ranlib"\
-		CPPFLAGS=-D_GNU_SOURCE && make && make install.libs
+		CPPFLAGS=-D_GNU_SOURCE && make -j8 && make install.libs
 	@# zig-build - cleaner approach but doesn't work, results in a dynamically linked binary.
 	@#cd static-$* && PKG_CONFIG_LIBDIR="`pwd`/inst/pkg" zig build -Dtarget=$*
 	@#	--build-file ../build.zig --search-prefix inst/ --cache-dir zig -Drelease-fast=true
 	@# Alternative approach, bypassing zig-build
 	cd static-$* && ${ZIG} build-exe -target $*\
 		-Iinst/include -Iinst/include/ncursesw -lc inst/lib/libncursesw.a\
-		--cache-dir zig-cache -static -fstrip -O ReleaseFast ../src/main.zig ../src/ncurses_refs.c
+		--cache-dir zig-cache -static -fstrip -O ReleaseFast ../src/main.zig
 	cd static-$* && mv main ncdu && tar -czf ../static-$*.tar.gz ncdu
 	rm -rf static-$*
 
@@ -101,3 +93,8 @@ static:\
 	static-linux-x86 \
 	static-linux-aarch64 \
 	static-linux-arm
+
+test:
+	zig build test
+	mandoc -T lint ncdu.1
+	reuse lint

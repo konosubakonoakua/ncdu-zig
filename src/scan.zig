@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
@@ -32,17 +32,17 @@ const Stat = struct {
     }
 
     fn read(parent: std.fs.Dir, name: [:0]const u8, follow: bool) !Stat {
-        const stat = try std.os.fstatatZ(parent.fd, name, if (follow) 0 else std.os.AT.SYMLINK_NOFOLLOW);
+        const stat = try std.posix.fstatatZ(parent.fd, name, if (follow) 0 else std.posix.AT.SYMLINK_NOFOLLOW);
         return Stat{
             .blocks = clamp(Stat, .blocks, stat.blocks),
             .size = clamp(Stat, .size, stat.size),
             .dev = truncate(Stat, .dev, stat.dev),
             .ino = truncate(Stat, .ino, stat.ino),
             .nlink = clamp(Stat, .nlink, stat.nlink),
-            .hlinkc = stat.nlink > 1 and !std.os.system.S.ISDIR(stat.mode),
-            .dir = std.os.system.S.ISDIR(stat.mode),
-            .reg = std.os.system.S.ISREG(stat.mode),
-            .symlink = std.os.system.S.ISLNK(stat.mode),
+            .hlinkc = stat.nlink > 1 and !std.posix.S.ISDIR(stat.mode),
+            .dir = std.posix.S.ISDIR(stat.mode),
+            .reg = std.posix.S.ISREG(stat.mode),
+            .symlink = std.posix.S.ISLNK(stat.mode),
             .ext = .{
                 .mtime = clamp(model.Ext, .mtime, stat.mtime().tv_sec),
                 .uid = truncate(model.Ext, .uid, stat.uid),
@@ -176,7 +176,7 @@ const ScanDir = struct {
         };
         var f = e.file().?;
         switch (t) {
-            .err => e.setErr(self.dir),
+            .err => f.pack.err = true,
             .other_fs => f.pack.other_fs = true,
             .kernfs => f.pack.kernfs = true,
             .excluded => f.pack.excluded = true,
@@ -231,16 +231,17 @@ const ScanDir = struct {
     }
 
     fn final(self: *Self) void {
-        if (self.entries.count() == 0) // optimization for the common case
-            return;
-        var it = &self.dir.sub;
-        while (it.*) |e| {
-            if (self.entries.contains(e)) {
-                e.delStatsRec(self.dir);
-                it.* = e.next;
-            } else
-                it = &e.next;
+        if (self.entries.count() > 0) {
+            var it = &self.dir.sub;
+            while (it.*) |e| {
+                if (self.entries.contains(e)) {
+                    e.delStatsRec(self.dir);
+                    it.* = e.next;
+                } else
+                    it = &e.next;
+            }
         }
+        self.dir.updateSubErr();
     }
 
     fn deinit(self: *Self) void {
@@ -261,6 +262,7 @@ const ScanDir = struct {
 const Context = struct {
     // When scanning to RAM
     parents: ?std.ArrayList(ScanDir) = null,
+    refreshing: ?*model.Dir = null,
     // When scanning to a file
     wr: ?*Writer = null,
 
@@ -293,14 +295,17 @@ const Context = struct {
         wr.print("{d}", .{std.time.timestamp()}) catch |e| writeErr(e);
         wr.writeByte('}') catch |e| writeErr(e);
 
-        var self = main.allocator.create(Self) catch unreachable;
+        const self = main.allocator.create(Self) catch unreachable;
         self.* = .{ .wr = buf };
         return self;
     }
 
     fn initMem(dir: ?*model.Dir) *Self {
         var self = main.allocator.create(Self) catch unreachable;
-        self.* = .{ .parents = std.ArrayList(ScanDir).init(main.allocator) };
+        self.* = .{
+            .parents = std.ArrayList(ScanDir).init(main.allocator),
+            .refreshing = dir,
+        };
         if (dir) |d| self.parents.?.append(ScanDir.init(d)) catch unreachable;
         return self;
     }
@@ -311,6 +316,8 @@ const Context = struct {
             defer counting_hardlinks = false;
             main.handleEvent(false, true);
             model.inodes.addAllStats();
+            var p = self.refreshing;
+            while (p) |d| : (p = d.parent) d.updateSubErr();
         }
         if (self.wr) |wr| {
             wr.writer().writeByte(']') catch |e| writeErr(e);
@@ -353,7 +360,7 @@ const Context = struct {
     // Set a flag to indicate that there was an error listing file entries in the current directory.
     // (Such errors are silently ignored when exporting to a file, as the directory metadata has already been written)
     fn setDirlistError(self: *Self) void {
-        if (self.parents) |*p| p.items[p.items.len-1].dir.entry.setErr(p.items[p.items.len-1].dir);
+        if (self.parents) |*p| p.items[p.items.len-1].dir.pack.err = true;
     }
 
     const Special = enum { err, other_fs, kernfs, excluded };
@@ -447,8 +454,8 @@ const Context = struct {
 var active_context: *Context = undefined;
 
 // Read and index entries of the given dir.
-fn scanDir(ctx: *Context, pat: *const exclude.Patterns, dir: std.fs.IterableDir, dir_dev: u64) void {
-    var it = main.allocator.create(std.fs.IterableDir.Iterator) catch unreachable;
+fn scanDir(ctx: *Context, pat: *const exclude.Patterns, dir: std.fs.Dir, dir_dev: u64) void {
+    var it = main.allocator.create(std.fs.Dir.Iterator) catch unreachable;
     defer main.allocator.destroy(it);
     it.* = dir.iterate();
     while(true) {
@@ -468,7 +475,7 @@ fn scanDir(ctx: *Context, pat: *const exclude.Patterns, dir: std.fs.IterableDir,
             continue;
         }
 
-        ctx.stat = Stat.read(dir.dir, ctx.name, false) catch {
+        ctx.stat = Stat.read(dir, ctx.name, false) catch {
             ctx.addSpecial(.err);
             continue;
         };
@@ -478,7 +485,7 @@ fn scanDir(ctx: *Context, pat: *const exclude.Patterns, dir: std.fs.IterableDir,
         }
 
         if (main.config.follow_symlinks and ctx.stat.symlink) {
-            if (Stat.read(dir.dir, ctx.name, true)) |nstat| {
+            if (Stat.read(dir, ctx.name, true)) |nstat| {
                 if (!nstat.dir) {
                     ctx.stat = nstat;
                     // Symlink targets may reside on different filesystems,
@@ -495,20 +502,19 @@ fn scanDir(ctx: *Context, pat: *const exclude.Patterns, dir: std.fs.IterableDir,
 
         var edir =
             if (!ctx.stat.dir) null
-            else if (dir.dir.openDirZ(ctx.name, .{ .no_follow = true }, true)) |d| std.fs.IterableDir{.dir = d}
-            else |_| {
+            else dir.openDirZ(ctx.name, .{ .no_follow = true, .iterate = true }) catch {
                 ctx.addSpecial(.err);
                 continue;
             };
         defer if (edir != null) edir.?.close();
 
-        if (@import("builtin").os.tag == .linux and main.config.exclude_kernfs and ctx.stat.dir and isKernfs(edir.?.dir, ctx.stat.dev)) {
+        if (@import("builtin").os.tag == .linux and main.config.exclude_kernfs and ctx.stat.dir and isKernfs(edir.?, ctx.stat.dev)) {
             ctx.addSpecial(.kernfs);
             continue;
         }
 
         if (main.config.exclude_caches and ctx.stat.dir) {
-            if (edir.?.dir.openFileZ("CACHEDIR.TAG", .{})) |f| {
+            if (edir.?.openFileZ("CACHEDIR.TAG", .{})) |f| {
                 const sig = "Signature: 8a477f597d28d172789f06886806bc55";
                 var buf: [sig.len]u8 = undefined;
                 if (f.reader().readAll(&buf)) |len| {
@@ -555,14 +561,13 @@ pub fn setupRefresh(parent: *model.Dir) void {
 // To be called after setupRefresh() (or from scanRoot())
 pub fn scan() void {
     defer active_context.deinit();
-    var dir_ = std.fs.cwd().openDirZ(active_context.pathZ(), .{}, true) catch |e| {
+    var dir = std.fs.cwd().openDirZ(active_context.pathZ(), .{ .iterate = true }) catch |e| {
         active_context.last_error = main.allocator.dupeZ(u8, active_context.path.items) catch unreachable;
         active_context.fatal_error = e;
         while (main.state == .refresh or main.state == .scan)
             main.handleEvent(true, true);
         return;
     };
-    var dir = std.fs.IterableDir{.dir = dir_};
     defer dir.close();
     var pat = exclude.getPatterns(active_context.pathZ());
     defer pat.deinit();

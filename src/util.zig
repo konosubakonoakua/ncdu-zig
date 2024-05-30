@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");

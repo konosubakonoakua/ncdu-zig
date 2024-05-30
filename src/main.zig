@@ -1,7 +1,7 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
-pub const program_version = "2.3";
+pub const program_version = "2.4";
 
 const std = @import("std");
 const model = @import("model.zig");
@@ -287,7 +287,7 @@ fn tryReadArgsFile(path: [:0]const u8) void {
             error.EndOfStream => if (line_fbs.getPos() catch unreachable == 0) break,
             else => |e| ui.die("Error reading from {s}: {s}\nRun with --ignore-config to skip reading config files.\n", .{ path, ui.errorString(e) }),
         };
-        var line_ = line_fbs.getWritten();
+        const line_ = line_fbs.getWritten();
 
         var line = std.mem.trim(u8, line_, &std.ascii.whitespace);
         if (line.len == 0 or line[0] == '#') continue;
@@ -365,7 +365,7 @@ fn spawnShell() void {
     else
         env.put("NCDU_LEVEL", "1") catch unreachable;
 
-    const shell = std.os.getenvZ("NCDU_SHELL") orelse std.os.getenvZ("SHELL") orelse "/bin/sh";
+    const shell = std.posix.getenvZ("NCDU_SHELL") orelse std.posix.getenvZ("SHELL") orelse "/bin/sh";
     var child = std.process.Child.init(&.{shell}, allocator);
     child.cwd = path.items;
     child.env_map = &env;
@@ -433,7 +433,6 @@ pub fn main() void {
                 config.thousands_sep = span;
         }
     }
-    if (std.os.getenvZ("NO_COLOR") == null) config.ui_color = .darkbg;
 
     const loadConf = blk: {
         var args = std.process.ArgIteratorPosix.init();
@@ -446,12 +445,12 @@ pub fn main() void {
     if (loadConf) {
         tryReadArgsFile("/etc/ncdu.conf");
 
-        if (std.os.getenvZ("XDG_CONFIG_HOME")) |p| {
-            var path = std.fs.path.joinZ(allocator, &.{p, "ncdu", "config"}) catch unreachable;
+        if (std.posix.getenvZ("XDG_CONFIG_HOME")) |p| {
+            const path = std.fs.path.joinZ(allocator, &.{p, "ncdu", "config"}) catch unreachable;
             defer allocator.free(path);
             tryReadArgsFile(path);
-        } else if (std.os.getenvZ("HOME")) |p| {
-            var path = std.fs.path.joinZ(allocator, &.{p, ".config", "ncdu", "config"}) catch unreachable;
+        } else if (std.posix.getenvZ("HOME")) |p| {
+            const path = std.fs.path.joinZ(allocator, &.{p, ".config", "ncdu", "config"}) catch unreachable;
             defer allocator.free(path);
             tryReadArgsFile(path);
         }
@@ -460,8 +459,9 @@ pub fn main() void {
     var scan_dir: ?[]const u8 = null;
     var import_file: ?[:0]const u8 = null;
     var export_file: ?[:0]const u8 = null;
+    var quit_after_scan = false;
     {
-        var arglist = std.process.argsAlloc(allocator) catch unreachable;
+        const arglist = std.process.argsAlloc(allocator) catch unreachable;
         defer std.process.argsFree(allocator, arglist);
         var args = Args.init(arglist);
         _ = args.next(); // program name
@@ -479,6 +479,7 @@ pub fn main() void {
             else if (opt.is("-f") and import_file != null) ui.die("The -f flag can only be given once.\n", .{})
             else if (opt.is("-f")) import_file = allocator.dupeZ(u8, args.arg()) catch unreachable
             else if (opt.is("--ignore-config")) {}
+            else if (opt.is("--quit-after-scan")) quit_after_scan = true // undocumented feature to help with benchmarking scan/import
             else if (argConfig(&args, opt)) {}
             else ui.die("Unrecognized option '{s}'.\n", .{opt.val});
         }
@@ -504,7 +505,7 @@ pub fn main() void {
     event_delay_timer = std.time.Timer.start() catch unreachable;
     defer ui.deinit();
 
-    var out_file = if (export_file) |f| (
+    const out_file = if (export_file) |f| (
         if (std.mem.eql(u8, f, "-")) stdout
         else std.fs.cwd().createFileZ(f, .{})
              catch |e| ui.die("Error opening export file: {s}.\n", .{ui.errorString(e)})
@@ -515,7 +516,7 @@ pub fn main() void {
         config.imported = true;
     } else scan.scanRoot(scan_dir orelse ".", out_file)
            catch |e| ui.die("Error opening directory: {s}.\n", .{ui.errorString(e)});
-    if (out_file != null) return;
+    if (quit_after_scan or out_file != null) return;
 
     config.can_shell = config.can_shell orelse !config.imported;
     config.can_delete = config.can_delete orelse !config.imported;
@@ -571,7 +572,7 @@ pub fn handleEvent(block: bool, force_draw: bool) void {
 
     var firstblock = block;
     while (true) {
-        var ch = ui.getch(firstblock);
+        const ch = ui.getch(firstblock);
         if (ch == 0) return;
         if (ch == -1) return handleEvent(firstblock, true);
         switch (state) {

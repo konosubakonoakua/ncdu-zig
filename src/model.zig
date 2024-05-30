@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
@@ -109,16 +109,11 @@ pub const Entry = extern struct {
         };
     }
 
-    // Set the 'err' flag on Dirs and Files, propagating 'suberr' to parents.
-    pub fn setErr(self: *Self, parent: *Dir) void {
-        if (self.dir()) |d| d.pack.err = true
-        else if (self.file()) |f| f.pack.err = true
-        else unreachable;
-        var it: ?*Dir = if (&parent.entry == self) parent.parent else parent;
-        while (it) |p| : (it = p.parent) {
-            if (p.pack.suberr) break;
-            p.pack.suberr = true;
-        }
+    fn hasErr(self: *Self) bool {
+        return
+            if (self.file()) |f| f.pack.err
+            else if (self.dir()) |d| d.pack.err or d.pack.suberr
+            else false;
     }
 
     pub fn addStats(self: *Entry, parent: *Dir, nlink: u31) void {
@@ -265,6 +260,19 @@ pub const Dir = extern struct {
             i -= 1;
         }
     }
+
+    // Only updates the suberr of this Dir, assumes child dirs have already
+    // been updated and does not propagate to parents.
+    pub fn updateSubErr(self: *@This()) void {
+        self.pack.suberr = false;
+        var sub = self.sub;
+        while (sub) |e| : (sub = e.next) {
+            if (e.hasErr()) {
+                self.pack.suberr = true;
+                break;
+            }
+        }
+    }
 };
 
 // File that's been hardlinked (i.e. nlink > 1)
@@ -319,7 +327,7 @@ pub const devices = struct {
     var lookup = std.AutoHashMap(u64, DevId).init(main.allocator);
 
     pub fn getId(dev: u64) DevId {
-        var d = lookup.getOrPut(dev) catch unreachable;
+        const d = lookup.getOrPut(dev) catch unreachable;
         if (!d.found_existing) {
             d.value_ptr.* = @as(DevId, @intCast(list.items.len));
             list.append(dev) catch unreachable;
@@ -400,7 +408,7 @@ pub const inodes = struct {
                 nlink += 1;
                 var parent: ?*Dir = it.parent;
                 while (parent) |p| : (parent = p.parent) {
-                    var de = dirs.getOrPut(p) catch unreachable;
+                    const de = dirs.getOrPut(p) catch unreachable;
                     if (de.found_existing) de.value_ptr.* += 1
                     else de.value_ptr.* = 1;
                 }

@@ -1,4 +1,4 @@
-// SPDX-FileCopyrightText: 2021-2023 Yoran Heling <projects@yorhel.nl>
+// SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
 // Ncurses wrappers and TUI helper functions.
@@ -192,17 +192,9 @@ test "shorten" {
     try t("ą́ą́ą́ą́ą́ą́", 5, "ą́...̨́ą́"); // Combining marks, similarly bad.
 }
 
-// ncurses_refs.c
-extern fn ncdu_acs_ulcorner() c.chtype;
-extern fn ncdu_acs_llcorner() c.chtype;
-extern fn ncdu_acs_urcorner() c.chtype;
-extern fn ncdu_acs_lrcorner() c.chtype;
-extern fn ncdu_acs_hline()    c.chtype;
-extern fn ncdu_acs_vline()    c.chtype;
-
 const StyleAttr = struct { fg: i16, bg: i16, attr: u32 };
 const StyleDef = struct {
-    name: []const u8,
+    name: [:0]const u8,
     off: StyleAttr,
     dark: StyleAttr,
     darkbg: StyleAttr,
@@ -287,8 +279,8 @@ const styles = [_]StyleDef{
 };
 
 pub const Style = lbl: {
-    comptime var fields: [styles.len]std.builtin.Type.EnumField = undefined;
-    inline for (&fields, styles, 0..) |*field, s, i| {
+    var fields: [styles.len]std.builtin.Type.EnumField = undefined;
+    for (&fields, styles, 0..) |*field, s, i| {
         field.* = .{
             .name = s.name,
             .value = i,
@@ -350,9 +342,9 @@ pub fn init() void {
     if (inited) return;
     clearScr();
     if (main.config.nc_tty) {
-        var tty = c.fopen("/dev/tty", "r+");
-        if (tty == null) die("Error opening /dev/tty: {s}.\n", .{ c.strerror(@intFromEnum(std.c.getErrno(-1))) });
-        var term = c.newterm(null, tty, tty);
+        const tty = c.fopen("/dev/tty", "r+");
+        if (tty == null) die("Error opening /dev/tty: {s}.\n", .{ c.strerror(@intFromEnum(std.posix.errno(-1))) });
+        const term = c.newterm(null, tty, tty);
         if (term == null) die("Error initializing ncurses.\n", .{});
         _ = c.set_term(term);
     } else {
@@ -481,14 +473,14 @@ pub fn addnum(bg: Bg, v: u64) void {
 
 // Print a file mode, takes 10 columns
 pub fn addmode(mode: u32) void {
-    addch(switch (mode & std.os.S.IFMT) {
-        std.os.S.IFDIR  => 'd',
-        std.os.S.IFREG  => '-',
-        std.os.S.IFLNK  => 'l',
-        std.os.S.IFIFO  => 'p',
-        std.os.S.IFSOCK => 's',
-        std.os.S.IFCHR  => 'c',
-        std.os.S.IFBLK  => 'b',
+    addch(switch (mode & std.posix.S.IFMT) {
+        std.posix.S.IFDIR  => 'd',
+        std.posix.S.IFREG  => '-',
+        std.posix.S.IFLNK  => 'l',
+        std.posix.S.IFIFO  => 'p',
+        std.posix.S.IFSOCK => 's',
+        std.posix.S.IFCHR  => 'c',
+        std.posix.S.IFBLK  => 'b',
         else => '?'
     });
     addch(if (mode &  0o400 > 0) 'r' else '-');
@@ -499,7 +491,7 @@ pub fn addmode(mode: u32) void {
     addch(if (mode & 0o2000 > 0) 's' else if (mode & 0o010 > 0) @as(u7, 'x') else '-');
     addch(if (mode &  0o004 > 0) 'r' else '-');
     addch(if (mode &  0o002 > 0) 'w' else '-');
-    addch(if (mode & 0o1000 > 0) (if (std.os.S.ISDIR(mode)) @as(u7, 't') else 'T') else if (mode & 0o001 > 0) @as(u7, 'x') else '-');
+    addch(if (mode & 0o1000 > 0) (if (std.posix.S.ISDIR(mode)) @as(u7, 't') else 'T') else if (mode & 0o001 > 0) @as(u7, 'x') else '-');
 }
 
 // Print a timestamp, takes 25 columns
@@ -535,20 +527,21 @@ pub const Box = struct {
         style(.default);
         if (width < 6 or height < 3) return s;
 
-        const ulcorner = ncdu_acs_ulcorner();
-        const llcorner = ncdu_acs_llcorner();
-        const urcorner = ncdu_acs_urcorner();
-        const lrcorner = ncdu_acs_lrcorner();
-        const acs_hline = ncdu_acs_hline();
-        const acs_vline = ncdu_acs_vline();
+        const acs_map = @extern(*[128]c.chtype, .{ .name = "acs_map" });
+        const ulcorner = acs_map['l'];
+        const llcorner = acs_map['m'];
+        const urcorner = acs_map['k'];
+        const lrcorner = acs_map['j'];
+        const acs_hline = acs_map['q'];
+        const acs_vline = acs_map['x'];
 
         var i: u32 = 0;
         while (i < height) : (i += 1) {
             s.move(i, 0);
-            addch(if (i == 0) ulcorner else if (i == height-1) llcorner else acs_hline);
-            hline(if (i == 0 or i == height-1) acs_vline else ' ', width-2);
+            addch(if (i == 0) ulcorner else if (i == height-1) llcorner else acs_vline);
+            hline(if (i == 0 or i == height-1) acs_hline else ' ', width-2);
             s.move(i, width-1);
-            addch(if (i == 0) urcorner else if (i == height-1) lrcorner else acs_hline);
+            addch(if (i == 0) urcorner else if (i == height-1) lrcorner else acs_vline);
         }
 
         s.move(0, 3);
@@ -599,5 +592,5 @@ pub fn getch(block: bool) i32 {
         return ch;
     }
     die("Error reading keyboard input, assuming TTY has been lost.\n(Potentially nonsensical error message: {s})\n",
-        .{ c.strerror(@intFromEnum(std.c.getErrno(-1))) });
+        .{ c.strerror(@intFromEnum(std.posix.errno(-1))) });
 }
