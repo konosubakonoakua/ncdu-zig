@@ -6,19 +6,50 @@ const main = @import("main.zig");
 const ui = @import("ui.zig");
 const util = @import("util.zig");
 
-// While an arena allocator is optimimal for almost all scenarios in which ncdu
-// is used, it doesn't allow for re-using deleted nodes after doing a delete or
-// refresh operation, so a long-running ncdu session with regular refreshes
-// will leak memory, but I'd say that's worth the efficiency gains.
-// TODO: Can still implement a simple bucketed free list on top of this arena
-// allocator to reuse nodes, if necessary.
-var allocator_state = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-const allocator = allocator_state.allocator();
+// Numbers are used in the binfmt export, so must be stable.
+pub const EType = enum(i3) {
+    dir = 0,
+    reg = 1,
+    nonreg = 2,
+    link = 3,
+    err = -1,
+    pattern = -2,
+    otherfs = -3,
+    kernfs = -4,
 
-pub const EType = enum(u2) { dir, link, file };
+    pub fn base(t: EType) EType {
+        return switch (t) {
+            .dir, .link => t,
+            else => .reg,
+        };
+    }
+
+    // Whether this entry should be displayed as a "directory".
+    // Some dirs are actually represented in this data model as a File for efficiency.
+    pub fn isDirectory(t: EType) bool {
+        return switch (t) {
+            .dir, .otherfs, .kernfs => true,
+            else => false,
+        };
+    }
+};
 
 // Type for the Entry.Packed.blocks field. Smaller than a u64 to make room for flags.
 pub const Blocks = u60;
+
+// Entries read from bin_reader may refer to other entries by itemref rather than pointer.
+// This is a hack that allows browser.zig to use the same types for in-memory
+// and bin_reader-backed directory trees. Most code can only deal with
+// in-memory trees and accesses the .ptr field directly.
+pub const Ref = extern union {
+    ptr: ?*Entry align(1),
+    ref: u64 align(1),
+
+    pub fn isNull(r: Ref) bool {
+        if (main.config.binreader) return r.ref == std.math.maxInt(u64)
+        else return r.ptr == null;
+    }
+};
 
 // Memory layout:
 //      (Ext +) Dir + name
@@ -34,16 +65,11 @@ pub const Blocks = u60;
 pub const Entry = extern struct {
     pack: Packed align(1),
     size: u64 align(1) = 0,
-    next: ?*Entry align(1) = null,
+    next: Ref = .{ .ptr = null },
 
     pub const Packed = packed struct(u64) {
         etype: EType,
         isext: bool,
-        // Whether or not this entry's size has been counted in its parents.
-        // Counting of Link entries is deferred until the scan/delete operation has
-        // completed, so for those entries this flag indicates an intention to be
-        // counted.
-        counted: bool = false,
         blocks: Blocks = 0, // 512-byte blocks
     };
 
@@ -58,23 +84,21 @@ pub const Entry = extern struct {
     }
 
     pub fn file(self: *Self) ?*File {
-        return if (self.pack.etype == .file) @ptrCast(self) else null;
-    }
-
-    // Whether this entry should be displayed as a "directory".
-    // Some dirs are actually represented in this data model as a File for efficiency.
-    pub fn isDirectory(self: *Self) bool {
-        return if (self.file()) |f| f.pack.other_fs or f.pack.kernfs else self.pack.etype == .dir;
+        return if (self.pack.etype != .dir and self.pack.etype != .link) @ptrCast(self) else null;
     }
 
     pub fn name(self: *const Self) [:0]const u8 {
         const self_name = switch (self.pack.etype) {
             .dir => &@as(*const Dir, @ptrCast(self)).name,
             .link => &@as(*const Link, @ptrCast(self)).name,
-            .file => &@as(*const File, @ptrCast(self)).name,
+            else => &@as(*const File, @ptrCast(self)).name,
         };
         const name_ptr: [*:0]const u8 = @ptrCast(self_name);
         return std.mem.sliceTo(name_ptr, 0);
+    }
+
+    pub fn nameHash(self: *const Self) u64 {
+        return std.hash.Wyhash.hash(0, self.name());
     }
 
     pub fn ext(self: *Self) ?*Ext {
@@ -82,7 +106,7 @@ pub const Entry = extern struct {
         return @ptrCast(@as([*]Ext, @ptrCast(self)) - 1);
     }
 
-    fn alloc(comptime T: type, etype: EType, isext: bool, ename: []const u8) *Entry {
+    fn alloc(comptime T: type, allocator: std.mem.Allocator, etype: EType, isext: bool, ename: []const u8) *Entry {
         const size = (if (isext) @as(usize, @sizeOf(Ext)) else 0) + @sizeOf(T) + ename.len + 1;
         var ptr = blk: while (true) {
             if (allocator.allocWithOptions(u8, size, 1, null)) |p| break :blk p
@@ -101,115 +125,65 @@ pub const Entry = extern struct {
         return &e.entry;
     }
 
-    pub fn create(etype: EType, isext: bool, ename: []const u8) *Entry {
+    pub fn create(allocator: std.mem.Allocator, etype: EType, isext: bool, ename: []const u8) *Entry {
         return switch (etype) {
-            .dir  => alloc(Dir, etype, isext, ename),
-            .file => alloc(File, etype, isext, ename),
-            .link => alloc(Link, etype, isext, ename),
+            .dir  => alloc(Dir, allocator, etype, isext, ename),
+            .link => alloc(Link, allocator, etype, isext, ename),
+            else => alloc(File, allocator, etype, isext, ename),
         };
+    }
+
+    pub fn destroy(self: *Self, allocator: std.mem.Allocator) void {
+        const ptr: [*]u8 = if (self.ext()) |e| @ptrCast(e) else @ptrCast(self);
+        const esize: usize = switch (self.pack.etype) {
+            .dir => @sizeOf(Dir),
+            .link => @sizeOf(Link),
+            else => @sizeOf(File),
+        };
+        const size = (if (self.pack.isext) @as(usize, @sizeOf(Ext)) else 0) + esize + self.name().len + 1;
+        allocator.free(ptr[0..size]);
     }
 
     fn hasErr(self: *Self) bool {
         return
-            if (self.file()) |f| f.pack.err
-            else if (self.dir()) |d| d.pack.err or d.pack.suberr
-            else false;
+            if(self.dir()) |d| d.pack.err or d.pack.suberr
+            else self.pack.etype == .err;
     }
 
-    pub fn addStats(self: *Entry, parent: *Dir, nlink: u31) void {
-        if (self.pack.counted) return;
-        self.pack.counted = true;
-
-        // Add link to the inode map, but don't count its size (yet).
-        if (self.link()) |l| {
-            l.parent = parent;
-            var d = inodes.map.getOrPut(l) catch unreachable;
-            if (!d.found_existing) {
-                d.value_ptr.* = .{ .counted = false, .nlink = nlink };
-                inodes.total_blocks +|= self.pack.blocks;
-                l.next = l;
-            } else {
-                inodes.setStats(.{ .key_ptr = d.key_ptr, .value_ptr = d.value_ptr }, false);
-                // If the nlink counts are not consistent, reset to 0 so we calculate with what we have instead.
-                if (d.value_ptr.nlink != nlink)
-                    d.value_ptr.nlink = 0;
-                l.next = d.key_ptr.*.next;
-                d.key_ptr.*.next = l;
-            }
-            inodes.addUncounted(l);
-        }
-
-        var it: ?*Dir = parent;
-        while(it) |p| : (it = p.parent) {
-            if (self.ext()) |e|
-                if (p.entry.ext()) |pe|
-                    if (e.mtime > pe.mtime) { pe.mtime = e.mtime; };
-            p.items +|= 1;
-            if (self.pack.etype != .link) {
-                p.entry.size +|= self.size;
-                p.entry.pack.blocks +|= self.pack.blocks;
-            }
-        }
-    }
-
-    // Opposite of addStats(), but has some limitations:
-    // - If addStats() saturated adding sizes, then the sizes after delStats()
-    //   will be incorrect.
-    // - mtime of parents is not adjusted (but that's a feature, possibly?)
-    //
-    // This function assumes that, for directories, all sub-entries have
-    // already been un-counted.
-    //
-    // When removing a Link, the entry's nlink counter is reset to zero, so
-    // that it will be recalculated based on our view of the tree. This means
-    // that links outside of the scanned directory will not be considered
-    // anymore, meaning that delStats() followed by addStats() with the same
-    // data may cause information to be lost.
-    pub fn delStats(self: *Entry, parent: *Dir) void {
-        if (!self.pack.counted) return;
-        defer self.pack.counted = false; // defer, to make sure inodes.setStats() still sees it as counted.
-
-        if (self.link()) |l| {
-            var d = inodes.map.getEntry(l).?;
-            inodes.setStats(d, false);
-            d.value_ptr.nlink = 0;
-            if (l.next == l) {
-                _ = inodes.map.remove(l);
-                _ = inodes.uncounted.remove(l);
-                inodes.total_blocks -|= self.pack.blocks;
-            } else {
-                if (d.key_ptr.* == l)
-                    d.key_ptr.* = l.next;
-                inodes.addUncounted(l.next);
-                // This is O(n), which in this context has the potential to
-                // slow ncdu down to a crawl. But this function is only called
-                // on refresh/delete operations and even then it's not common
-                // to have very long lists, so this blowing up should be very
-                // rare. This removal can also be deferred to setStats() to
-                // amortize the costs, if necessary.
-                var it = l.next;
-                while (it.next != l) it = it.next;
-                it.next = l.next;
-            }
-        }
-
-        var it: ?*Dir = parent;
-        while(it) |p| : (it = p.parent) {
-            p.items -|= 1;
-            if (self.pack.etype != .link) {
-                p.entry.size -|= self.size;
-                p.entry.pack.blocks -|= self.pack.blocks;
-            }
-        }
-    }
-
-    pub fn delStatsRec(self: *Entry, parent: *Dir) void {
+    fn removeLinks(self: *Entry) void {
         if (self.dir()) |d| {
-            var it = d.sub;
-            while (it) |e| : (it = e.next)
-                e.delStatsRec(d);
+            var it = d.sub.ptr;
+            while (it) |e| : (it = e.next.ptr) e.removeLinks();
         }
-        self.delStats(parent);
+        if (self.link()) |l| l.removeLink();
+    }
+
+    fn zeroStatsRec(self: *Entry) void {
+        self.pack.blocks = 0;
+        self.size = 0;
+        if (self.dir()) |d| {
+            d.items = 0;
+            d.pack.err = false;
+            d.pack.suberr = false;
+            var it = d.sub.ptr;
+            while (it) |e| : (it = e.next.ptr) e.zeroStatsRec();
+        }
+    }
+
+    // Recursively set stats and those of sub-items to zero and removes counts
+    // from parent directories; as if this item does not exist in the tree.
+    // XXX: Does not update the 'suberr' flag of parent directories, make sure
+    // to call updateSubErr() afterwards.
+    pub fn zeroStats(self: *Entry, parent: ?*Dir) void {
+        self.removeLinks();
+
+        var it = parent;
+        while (it) |p| : (it = p.parent) {
+            p.entry.pack.blocks -|= self.pack.blocks;
+            p.entry.size -|= self.size;
+            p.items -|= 1 + (if (self.dir()) |d| d.items else 0);
+        }
+        self.zeroStatsRec();
     }
 };
 
@@ -218,7 +192,7 @@ const DevId = u30; // Can be reduced to make room for more flags in Dir.Packed.
 pub const Dir = extern struct {
     entry: Entry,
 
-    sub: ?*Entry align(1) = null,
+    sub: Ref = .{ .ptr = null },
     parent: ?*Dir align(1) = null,
 
     // entry.{blocks,size}: Total size of all unique files + dirs. Non-shared hardlinks are counted only once.
@@ -265,8 +239,8 @@ pub const Dir = extern struct {
     // been updated and does not propagate to parents.
     pub fn updateSubErr(self: *@This()) void {
         self.pack.suberr = false;
-        var sub = self.sub;
-        while (sub) |e| : (sub = e.next) {
+        var sub = self.sub.ptr;
+        while (sub) |e| : (sub = e.next.ptr) {
             if (e.hasErr()) {
                 self.pack.suberr = true;
                 break;
@@ -279,10 +253,21 @@ pub const Dir = extern struct {
 pub const Link = extern struct {
     entry: Entry,
     parent: *Dir align(1) = undefined,
-    next: *Link align(1) = undefined, // Singly circular linked list of all *Link nodes with the same dev,ino.
+    next: *Link align(1) = undefined, // circular linked list of all *Link nodes with the same dev,ino.
+    prev: *Link align(1) = undefined,
     // dev is inherited from the parent Dir
     ino: u64 align(1) = undefined,
+    pack: Pack align(1) = .{},
     name: [0]u8 = undefined,
+
+    const Pack = packed struct(u32) {
+        // Whether this Inode is counted towards the parent directories.
+        // Is kept synchronized between all Link nodes with the same dev/ino.
+        counted: bool = false,
+        // Number of links for this inode. When set to '0', we don't know the
+        // actual nlink count; which happens for old JSON dumps.
+        nlink: u31 = undefined,
+    };
 
     // Return value should be freed with main.allocator.
     pub fn path(self: *const @This(), withRoot: bool) [:0]const u8 {
@@ -292,43 +277,89 @@ pub const Link = extern struct {
         out.appendSlice(self.entry.name()) catch unreachable;
         return out.toOwnedSliceSentinel(0) catch unreachable;
     }
+
+    // Add this link to the inodes map and mark it as 'uncounted'.
+    pub fn addLink(l: *@This()) void {
+        const d = inodes.map.getOrPut(l) catch unreachable;
+        if (!d.found_existing) {
+            l.next = l;
+            l.prev = l;
+        } else {
+            inodes.setStats(d.key_ptr.*, false);
+            l.next = d.key_ptr.*;
+            l.prev = d.key_ptr.*.prev;
+            l.next.prev = l;
+            l.prev.next = l;
+        }
+        inodes.addUncounted(l);
+    }
+
+    // Remove this link from the inodes map and remove its stats from parent directories.
+    fn removeLink(l: *@This()) void {
+        inodes.setStats(l, false);
+        const entry = inodes.map.getEntry(l) orelse return;
+        if (l.next == l) {
+            _ = inodes.map.remove(l);
+            _ = inodes.uncounted.remove(l);
+        } else {
+            // XXX: If this link is actually removed from the filesystem, then
+            // the nlink count of the existing links should be updated to
+            // reflect that. But we can't do that here, because this function
+            // is also called before doing a filesystem refresh - in which case
+            // the nlink count likely won't change. Best we can hope for is
+            // that a refresh will encounter another link to the same inode and
+            // trigger an nlink change.
+            if (entry.key_ptr.* == l)
+                entry.key_ptr.* = l.next;
+            inodes.addUncounted(l.next);
+            l.next.prev = l.prev;
+            l.prev.next = l.next;
+        }
+    }
 };
 
 // Anything that's not an (indexed) directory or hardlink. Excluded directories are also "Files".
 pub const File = extern struct {
     entry: Entry,
-    pack: Packed = .{},
     name: [0]u8 = undefined,
-
-    pub const Packed = packed struct(u8) {
-        err: bool = false,
-        excluded: bool = false,
-        other_fs: bool = false,
-        kernfs: bool = false,
-        notreg: bool = false,
-        _pad: u3 = 0, // Make this struct "ABI sized" to allow inclusion in an extern struct
-    };
 };
 
 pub const Ext = extern struct {
+    pack: Pack = .{},
     mtime: u64 align(1) = 0,
     uid: u32 align(1) = 0,
     gid: u32 align(1) = 0,
     mode: u16 align(1) = 0,
+
+    pub const Pack = packed struct(u8) {
+        hasmtime: bool = false,
+        hasuid: bool = false,
+        hasgid: bool = false,
+        hasmode: bool = false,
+        _pad: u4 = 0,
+    };
+
+    pub fn isEmpty(e: *const Ext) bool {
+        return !e.pack.hasmtime and !e.pack.hasuid and !e.pack.hasgid and !e.pack.hasmode;
+    }
 };
 
 
 // List of st_dev entries. Those are typically 64bits, but that's quite a waste
 // of space when a typical scan won't cover many unique devices.
 pub const devices = struct {
+    var lock = std.Thread.Mutex{};
     // id -> dev
     pub var list = std.ArrayList(u64).init(main.allocator);
     // dev -> id
     var lookup = std.AutoHashMap(u64, DevId).init(main.allocator);
 
     pub fn getId(dev: u64) DevId {
+        lock.lock();
+        defer lock.unlock();
         const d = lookup.getOrPut(dev) catch unreachable;
         if (!d.found_existing) {
+            if (list.items.len >= std.math.maxInt(DevId)) ui.die("Maximum number of device identifiers exceeded.\n", .{});
             d.value_ptr.* = @as(DevId, @intCast(list.items.len));
             list.append(dev) catch unreachable;
         }
@@ -343,13 +374,8 @@ pub const inodes = struct {
     // node in the list. Link entries with the same dev/ino are part of a
     // circular linked list, so you can iterate through all of them with this
     // single pointer.
-    const Map = std.HashMap(*Link, Inode, HashContext, 80);
+    const Map = std.HashMap(*Link, void, HashContext, 80);
     pub var map = Map.init(main.allocator);
-
-    // Cumulative size of all unique hard links in the map.  This is a somewhat
-    // ugly workaround to provide accurate sizes during the initial scan, when
-    // the hard links are not counted as part of the parent directories yet.
-    pub var total_blocks: Blocks = 0;
 
     // List of nodes in 'map' with !counted, to speed up addAllStats().
     // If this list grows large relative to the number of nodes in 'map', then
@@ -358,16 +384,7 @@ pub const inodes = struct {
     var uncounted = std.HashMap(*Link, void, HashContext, 80).init(main.allocator);
     var uncounted_full = true; // start with true for the initial scan
 
-    const Inode = packed struct {
-        // Whether this Inode is counted towards the parent directories.
-        counted: bool,
-        // Number of links for this inode. When set to '0', we don't know the
-        // actual nlink count, either because it wasn't part of the imported
-        // JSON data or because we read inconsistent values from the
-        // filesystem.  The count will then be updated by the actual number of
-        // links in our in-memory tree.
-        nlink: u31,
-    };
+    pub var lock = std.Thread.Mutex{};
 
     const HashContext = struct {
         pub fn hash(_: @This(), l: *Link) u64 {
@@ -395,61 +412,85 @@ pub const inodes = struct {
     // the list of *Links and their sizes and counts must be in the exact same
     // state as when the stats were added. Hence, any modification to the Link
     // state should be preceded by a setStats(.., false).
-    fn setStats(entry: Map.Entry, add: bool) void {
-        if (entry.value_ptr.counted == add) return;
-        entry.value_ptr.counted = add;
+    fn setStats(l: *Link, add: bool) void {
+        if (l.pack.counted == add) return;
 
         var nlink: u31 = 0;
+        var inconsistent = false;
         var dirs = std.AutoHashMap(*Dir, u32).init(main.allocator);
         defer dirs.deinit();
-        var it = entry.key_ptr.*;
+        var it = l;
         while (true) {
-            if (it.entry.pack.counted) {
-                nlink += 1;
-                var parent: ?*Dir = it.parent;
-                while (parent) |p| : (parent = p.parent) {
-                    const de = dirs.getOrPut(p) catch unreachable;
-                    if (de.found_existing) de.value_ptr.* += 1
-                    else de.value_ptr.* = 1;
-                }
+            it.pack.counted = add;
+            nlink += 1;
+            if (it.pack.nlink != l.pack.nlink) inconsistent = true;
+            var parent: ?*Dir = it.parent;
+            while (parent) |p| : (parent = p.parent) {
+                const de = dirs.getOrPut(p) catch unreachable;
+                if (de.found_existing) de.value_ptr.* += 1
+                else de.value_ptr.* = 1;
             }
             it = it.next;
-            if (it == entry.key_ptr.*)
+            if (it == l)
                 break;
         }
 
-        if (entry.value_ptr.nlink < nlink) entry.value_ptr.nlink = nlink
-        else nlink = entry.value_ptr.nlink;
+        // There's not many sensible things we can do when we encounter
+        // inconsistent nlink counts. Current approach is to use the number of
+        // times we've seen this link in our tree as fallback for when the
+        // nlink counts aren't matching. May want to add a warning of some
+        // sorts to the UI at some point.
+        if (!inconsistent and l.pack.nlink >= nlink) nlink = l.pack.nlink;
+
+        // XXX: We're also not testing for inconsistent entry sizes, instead
+        // using the given 'l' size for all Links. Might warrant a warning as
+        // well.
 
         var dir_iter = dirs.iterator();
         if (add) {
             while (dir_iter.next()) |de| {
-                de.key_ptr.*.entry.pack.blocks +|= entry.key_ptr.*.entry.pack.blocks;
-                de.key_ptr.*.entry.size        +|= entry.key_ptr.*.entry.size;
+                de.key_ptr.*.entry.pack.blocks +|= l.entry.pack.blocks;
+                de.key_ptr.*.entry.size        +|= l.entry.size;
                 if (de.value_ptr.* < nlink) {
-                    de.key_ptr.*.shared_blocks +|= entry.key_ptr.*.entry.pack.blocks;
-                    de.key_ptr.*.shared_size   +|= entry.key_ptr.*.entry.size;
+                    de.key_ptr.*.shared_blocks +|= l.entry.pack.blocks;
+                    de.key_ptr.*.shared_size   +|= l.entry.size;
                 }
             }
         } else {
             while (dir_iter.next()) |de| {
-                de.key_ptr.*.entry.pack.blocks -|= entry.key_ptr.*.entry.pack.blocks;
-                de.key_ptr.*.entry.size        -|= entry.key_ptr.*.entry.size;
+                de.key_ptr.*.entry.pack.blocks -|= l.entry.pack.blocks;
+                de.key_ptr.*.entry.size        -|= l.entry.size;
                 if (de.value_ptr.* < nlink) {
-                    de.key_ptr.*.shared_blocks -|= entry.key_ptr.*.entry.pack.blocks;
-                    de.key_ptr.*.shared_size   -|= entry.key_ptr.*.entry.size;
+                    de.key_ptr.*.shared_blocks -|= l.entry.pack.blocks;
+                    de.key_ptr.*.shared_size   -|= l.entry.size;
                 }
             }
         }
     }
 
+    // counters to track progress for addAllStats()
+    pub var add_total: usize = 0;
+    pub var add_done: usize = 0;
+
     pub fn addAllStats() void {
         if (uncounted_full) {
-            var it = map.iterator();
-            while (it.next()) |e| setStats(e, true);
+            add_total = map.count();
+            add_done = 0;
+            var it = map.keyIterator();
+            while (it.next()) |e| {
+                setStats(e.*, true);
+                add_done += 1;
+                if ((add_done & 65) == 0) main.handleEvent(false, false);
+            }
         } else {
-            var it = uncounted.iterator();
-            while (it.next()) |u| if (map.getEntry(u.key_ptr.*)) |e| setStats(e, true);
+            add_total = uncounted.count();
+            add_done = 0;
+            var it = uncounted.keyIterator();
+            while (it.next()) |u| {
+                if (map.getKey(u.*)) |e| setStats(e, true);
+                add_done += 1;
+                if ((add_done & 65) == 0) main.handleEvent(false, false);
+            }
         }
         uncounted_full = false;
         if (uncounted.count() > 0)
@@ -462,8 +503,9 @@ pub var root: *Dir = undefined;
 
 
 test "entry" {
-    var e = Entry.create(.file, false, "hello");
-    try std.testing.expectEqual(e.pack.etype, .file);
+    var e = Entry.create(std.testing.allocator, .reg, false, "hello");
+    defer e.destroy(std.testing.allocator);
+    try std.testing.expectEqual(e.pack.etype, .reg);
     try std.testing.expect(!e.pack.isext);
     try std.testing.expectEqualStrings(e.name(), "hello");
 }

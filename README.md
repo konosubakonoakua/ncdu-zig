@@ -20,9 +20,10 @@ C version (1.x).
 
 ## Requirements
 
-- Zig 0.12.0
+- Zig 0.12 or 0.13.
 - Some sort of POSIX-like OS
-- ncurses libraries and header files
+- ncurses
+- libzstd
 
 ## Install
 

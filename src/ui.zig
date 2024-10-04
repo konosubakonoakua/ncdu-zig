@@ -18,6 +18,8 @@ pub const c = @cImport({
 });
 
 pub var inited: bool = false;
+pub var main_thread: std.Thread.Id = undefined;
+pub var oom_threads = std.atomic.Value(usize).init(0);
 
 pub var rows: u32 = undefined;
 pub var cols: u32 = undefined;
@@ -44,13 +46,20 @@ pub fn quit() noreturn {
 // no clue if ncurses will consistently report OOM, but we're not handling that
 // right now.
 pub fn oom() void {
-    const haveui = inited;
-    deinit();
-    const stderr = std.io.getStdErr();
-    stderr.writeAll("\x1b7\x1b[JOut of memory, trying again in 1 second. Hit Ctrl-C to abort.\x1b8") catch {};
-    std.time.sleep(std.time.ns_per_s);
-    if (haveui)
-        init();
+    @setCold(true);
+    if (main_thread == std.Thread.getCurrentId()) {
+        const haveui = inited;
+        deinit();
+        const stderr = std.io.getStdErr();
+        stderr.writeAll("\x1b7\x1b[JOut of memory, trying again in 1 second. Hit Ctrl-C to abort.\x1b8") catch {};
+        std.time.sleep(std.time.ns_per_s);
+        if (haveui)
+            init();
+    } else {
+        _ = oom_threads.fetchAdd(1, .monotonic);
+        std.time.sleep(std.time.ns_per_s);
+        _ = oom_threads.fetchSub(1, .monotonic);
+    }
 }
 
 // Dumb strerror() alternative for Zig file I/O, not complete.
@@ -75,6 +84,7 @@ pub fn errorString(e: anyerror) [:0]const u8 {
         error.ReadOnlyFilesystem => "Read-only filesystem",
         error.SymlinkLoop => "Symlink loop",
         error.SystemFdQuotaExceeded => "System file descriptor limit exceeded",
+        error.EndOfStream => "Unexpected end of file",
         else => @errorName(e),
     };
 }
@@ -405,38 +415,85 @@ pub fn addch(ch: c.chtype) void {
 //   unit = " XB" or " XiB"
 // Concatenated, these take 8 columns in SI mode or 9 otherwise.
 pub const FmtSize = struct {
-    buf: [8:0]u8,
+    buf: [5:0]u8,
     unit: [:0]const u8,
 
-    pub fn fmt(v: u64) @This() {
-        var r: @This() = undefined;
-        var f: f32 = @floatFromInt(v);
-        if (main.config.si) {
-            if(f < 1000.0)    { r.unit = "  B"; }
-            else if(f < 1e6)  { r.unit = " KB"; f /= 1e3;  }
-            else if(f < 1e9)  { r.unit = " MB"; f /= 1e6;  }
-            else if(f < 1e12) { r.unit = " GB"; f /= 1e9;  }
-            else if(f < 1e15) { r.unit = " TB"; f /= 1e12; }
-            else if(f < 1e18) { r.unit = " PB"; f /= 1e15; }
-            else              { r.unit = " EB"; f /= 1e18; }
-        }
-        else {
-            if(f < 1000.0)       { r.unit = "   B"; }
-            else if(f < 1023e3)  { r.unit = " KiB"; f /= 1024.0; }
-            else if(f < 1023e6)  { r.unit = " MiB"; f /= 1048576.0; }
-            else if(f < 1023e9)  { r.unit = " GiB"; f /= 1073741824.0; }
-            else if(f < 1023e12) { r.unit = " TiB"; f /= 1099511627776.0; }
-            else if(f < 1023e15) { r.unit = " PiB"; f /= 1125899906842624.0; }
-            else                 { r.unit = " EiB"; f /= 1152921504606846976.0; }
-        }
-        _ = std.fmt.bufPrintZ(&r.buf, "{d:>5.1}", .{f}) catch unreachable;
-        return r;
+    fn init(u: [:0]const u8, n: u64, mul: u64, div: u64) FmtSize {
+        return .{
+            .unit = u,
+            .buf = util.fmt5dec(@intCast( ((n*mul) +| (div / 2)) / div )),
+        };
     }
 
-    pub fn num(self: *const @This()) [:0]const u8 {
-        return std.mem.sliceTo(&self.buf, 0);
+    pub fn fmt(v: u64) FmtSize {
+        if (main.config.si) {
+            if      (v < 1000)                    { return FmtSize.init("  B", v, 10, 1); }
+            else if (v < 999_950)                 { return FmtSize.init(" KB", v, 1, 100); }
+            else if (v < 999_950_000)             { return FmtSize.init(" MB", v, 1, 100_000); }
+            else if (v < 999_950_000_000)         { return FmtSize.init(" GB", v, 1, 100_000_000); }
+            else if (v < 999_950_000_000_000)     { return FmtSize.init(" TB", v, 1, 100_000_000_000); }
+            else if (v < 999_950_000_000_000_000) { return FmtSize.init(" PB", v, 1, 100_000_000_000_000); }
+            else                                  { return FmtSize.init(" EB", v, 1, 100_000_000_000_000_000); }
+        } else {
+            // Cutoff values are obtained by calculating 999.949999999999999999999999 * div with an infinite-precision calculator.
+            // (Admittedly, this precision is silly)
+            if (v < 1000)                     { return FmtSize.init("   B", v, 10, 1); }
+            else if (v < 1023949)             { return FmtSize.init(" KiB", v, 10, 1<<10); }
+            else if (v < 1048523572)          { return FmtSize.init(" MiB", v, 10, 1<<20); }
+            else if (v < 1073688136909)       { return FmtSize.init(" GiB", v, 10, 1<<30); }
+            else if (v < 1099456652194612)    { return FmtSize.init(" TiB", v, 10, 1<<40); }
+            else if (v < 1125843611847281869) { return FmtSize.init(" PiB", v, 10, 1<<50); }
+            else                              { return FmtSize.init(" EiB", v, 1, (1<<60)/10); }
+        }
+    }
+
+    pub fn num(self: *const FmtSize) [:0]const u8 {
+        return &self.buf;
+    }
+
+    fn testEql(self: FmtSize, exp: []const u8) !void {
+        var buf: [10]u8 = undefined;
+        try std.testing.expectEqualStrings(exp, try std.fmt.bufPrint(&buf, "{s}{s}", .{ self.num(), self.unit }));
     }
 };
+
+test "fmtsize" {
+    main.config.si = true;
+    try FmtSize.fmt(            0).testEql("  0.0  B");
+    try FmtSize.fmt(          999).testEql("999.0  B");
+    try FmtSize.fmt(         1000).testEql("  1.0 KB");
+    try FmtSize.fmt(         1049).testEql("  1.0 KB");
+    try FmtSize.fmt(         1050).testEql("  1.1 KB");
+    try FmtSize.fmt(      999_899).testEql("999.9 KB");
+    try FmtSize.fmt(      999_949).testEql("999.9 KB");
+    try FmtSize.fmt(      999_950).testEql("  1.0 MB");
+    try FmtSize.fmt(     1000_000).testEql("  1.0 MB");
+    try FmtSize.fmt(  999_850_009).testEql("999.9 MB");
+    try FmtSize.fmt(  999_899_999).testEql("999.9 MB");
+    try FmtSize.fmt(  999_900_000).testEql("999.9 MB");
+    try FmtSize.fmt(  999_949_999).testEql("999.9 MB");
+    try FmtSize.fmt(  999_950_000).testEql("  1.0 GB");
+    try FmtSize.fmt(  999_999_999).testEql("  1.0 GB");
+    try FmtSize.fmt(std.math.maxInt(u64)).testEql(" 18.4 EB");
+
+    main.config.si = false;
+    try FmtSize.fmt(                  0).testEql("  0.0   B");
+    try FmtSize.fmt(                999).testEql("999.0   B");
+    try FmtSize.fmt(               1000).testEql("  1.0 KiB");
+    try FmtSize.fmt(               1024).testEql("  1.0 KiB");
+    try FmtSize.fmt(             102400).testEql("100.0 KiB");
+    try FmtSize.fmt(            1023898).testEql("999.9 KiB");
+    try FmtSize.fmt(            1023949).testEql("  1.0 MiB");
+    try FmtSize.fmt(         1048523571).testEql("999.9 MiB");
+    try FmtSize.fmt(         1048523572).testEql("  1.0 GiB");
+    try FmtSize.fmt(      1073688136908).testEql("999.9 GiB");
+    try FmtSize.fmt(      1073688136909).testEql("  1.0 TiB");
+    try FmtSize.fmt(   1099456652194611).testEql("999.9 TiB");
+    try FmtSize.fmt(   1099456652194612).testEql("  1.0 PiB");
+    try FmtSize.fmt(1125843611847281868).testEql("999.9 PiB");
+    try FmtSize.fmt(1125843611847281869).testEql("  1.0 EiB");
+    try FmtSize.fmt(std.math.maxInt(u64)).testEql(" 16.0 EiB");
+}
 
 // Print a formatted human-readable size string onto the given background.
 pub fn addsize(bg: Bg, v: u64) void {

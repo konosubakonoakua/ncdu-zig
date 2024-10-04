@@ -37,6 +37,37 @@ pub fn arrayListBufZ(buf: *std.ArrayList(u8)) [:0]const u8 {
     return buf.items[0..buf.items.len-1:0];
 }
 
+// Format an integer as right-aligned '###.#'.
+// Pretty much equivalent to:
+//   std.fmt.bufPrintZ(.., "{d:>5.1}", @floatFromInt(n)/10.0);
+// Except this function doesn't pull in large float formatting tables.
+pub fn fmt5dec(n: u14) [5:0]u8 {
+    std.debug.assert(n <= 9999);
+    var buf: [5:0]u8 = "  0.0".*;
+    var v = n;
+    buf[4] += @intCast(v % 10);
+    v /= 10;
+    buf[2] += @intCast(v % 10);
+    v /= 10;
+    if (v == 0) return buf;
+    buf[1] = '0' + @as(u8, @intCast(v % 10));
+    v /= 10;
+    if (v == 0) return buf;
+    buf[0] = '0' + @as(u8, @intCast(v));
+    return buf;
+}
+
+test "fmt5dec" {
+    const eq = std.testing.expectEqualStrings;
+    try eq("  0.0", &fmt5dec(0));
+    try eq("  0.5", &fmt5dec(5));
+    try eq("  9.5", &fmt5dec(95));
+    try eq(" 12.5", &fmt5dec(125));
+    try eq("123.9", &fmt5dec(1239));
+    try eq("999.9", &fmt5dec(9999));
+}
+
+
 // Straightforward Zig port of strnatcmp() from https://github.com/sourcefrog/natsort/
 // (Requiring nul-terminated strings is ugly, but we've got them anyway and it does simplify the code)
 pub fn strnatcmp(a: [:0]const u8, b: [:0]const u8) std.math.Order {

@@ -46,7 +46,7 @@ fn deleteItem(dir: std.fs.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry)
 
     if (entry.dir()) |d| {
         var fd = dir.openDirZ(path, .{ .no_follow = true, .iterate = false }) catch |e| return err(e);
-        var it = &d.sub;
+        var it = &d.sub.ptr;
         parent = d;
         defer parent = parent.parent.?;
         while (it.*) |n| {
@@ -55,15 +55,15 @@ fn deleteItem(dir: std.fs.Dir, path: [:0]const u8, ptr: *align(1) ?*model.Entry)
                 return true;
             }
             if (it.* == n) // item deletion failed, make sure to still advance to next
-                it = &n.next;
+                it = &n.next.ptr;
         }
         fd.close();
         dir.deleteDirZ(path) catch |e|
-            return if (e != error.DirNotEmpty or d.sub == null) err(e) else false;
+            return if (e != error.DirNotEmpty or d.sub.ptr == null) err(e) else false;
     } else
         dir.deleteFileZ(path) catch |e| return err(e);
-    ptr.*.?.delStats(parent);
-    ptr.* = ptr.*.?.next;
+    ptr.*.?.zeroStats(parent);
+    ptr.* = ptr.*.?.next.ptr;
     return false;
 }
 
@@ -76,8 +76,8 @@ pub fn delete() ?*model.Entry {
 
     // Find the pointer to this entry
     const e = entry;
-    var it = &parent.sub;
-    while (it.*) |n| : (it = &n.next)
+    var it = &parent.sub.ptr;
+    while (it.*) |n| : (it = &n.next.ptr)
         if (it.* == entry)
             break;
 

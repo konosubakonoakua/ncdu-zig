@@ -5,9 +5,7 @@ const std = @import("std");
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
-    const optimize = b.standardOptimizeOption(.{
-        .preferred_optimize_mode = .ReleaseFast,
-    });
+    const optimize = b.standardOptimizeOption(.{});
 
     const pie = b.option(bool, "pie", "Build with PIE support (by default false)") orelse false;
 
@@ -21,6 +19,7 @@ pub fn build(b: *std.Build) void {
 
     exe.pie = pie;
     exe.root_module.linkSystemLibrary("ncursesw", .{});
+    exe.root_module.linkSystemLibrary("libzstd", .{});
     // https://github.com/ziglang/zig/blob/b52be973dfb7d1408218b8e75800a2da3dc69108/build.zig#L551-L554
     if (target.result.isDarwin()) {
         // useful for package maintainers

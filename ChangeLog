@@ -1,6 +1,31 @@
 # SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
+2.6 - 2024-09-27
+	- Still requires Zig 0.12 or 0.13
+	- Add dependency on libzstd
+	- Add new export format to support threaded export and low-memory browsing
+	- Add `-O` and `--compress-level` CLI flags
+	- Add progress indicator to hardlink counting stage
+	- Fix displaying and exporting zero values when extended info is not available
+	- Fix clearing screen in some error cases
+	- Fix uncommon edge case in hardlink counting on refresh
+	- Use integer math instead of floating point to format numbers
+
+2.5 - 2024-07-24
+	- Still requires Zig 0.12 or 0.13
+	- Add parallel scanning with `-t,--threads` CLI flags
+	- Improve JSON export and import performance
+	- `--exclude-kernfs` is no longer checked on the top-level scan path
+	- Fix entries sometimes not showing up after refresh
+	- Fix file descriptor leak with `--exclude-caches` checking
+	- Fix possible crash on invalid UTF8 when scanning in `-1` UI mode
+	- Fix JSON export and import of the "other filesystem" flag
+	- Fix JSON import containing directories with a read error
+	- Fix mtime display of 'special' files
+	- Fix edge case bad performance when deleting hardlinks with many links
+	- Increased memory use for hardlinks (by ~10% in extreme cases, sorry)
+
 2.4 - 2024-04-21
 	- Now requires Zig 0.12
 	- Revert default color scheme back to 'off'

@@ -1,11 +1,18 @@
 // SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
-pub const program_version = "2.4";
+pub const program_version = "2.6";
 
 const std = @import("std");
 const model = @import("model.zig");
 const scan = @import("scan.zig");
+const json_import = @import("json_import.zig");
+const json_export = @import("json_export.zig");
+const bin_export = @import("bin_export.zig");
+const bin_reader = @import("bin_reader.zig");
+const sink = @import("sink.zig");
+const mem_src = @import("mem_src.zig");
+const mem_sink = @import("mem_sink.zig");
 const ui = @import("ui.zig");
 const browser = @import("browser.zig");
 const delete = @import("delete.zig");
@@ -16,6 +23,13 @@ const c = @cImport(@cInclude("locale.h"));
 test "imports" {
     _ = model;
     _ = scan;
+    _ = json_import;
+    _ = json_export;
+    _ = bin_export;
+    _ = bin_reader;
+    _ = sink;
+    _ = mem_src;
+    _ = mem_sink;
     _ = ui;
     _ = browser;
     _ = delete;
@@ -47,6 +61,14 @@ pub const allocator = std.mem.Allocator{
 };
 
 
+// Custom panic impl to reset the terminal before spewing out an error message.
+pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, ret_addr: ?usize) noreturn {
+    @setCold(true);
+    ui.deinit();
+    std.debug.panicImpl(error_return_trace, ret_addr orelse @returnAddress(), msg);
+}
+
+
 pub const config = struct {
     pub const SortCol = enum { name, blocks, size, items, mtime };
     pub const SortOrder = enum { asc, desc };
@@ -57,6 +79,8 @@ pub const config = struct {
     pub var exclude_caches: bool = false;
     pub var exclude_kernfs: bool = false;
     pub var exclude_patterns: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).init(allocator);
+    pub var threads: usize = 1;
+    pub var complevel: u8 = 4;
 
     pub var update_delay: u64 = 100*std.time.ns_per_ms;
     pub var scan_ui: ?enum { none, line, full } = null;
@@ -79,6 +103,7 @@ pub const config = struct {
     pub var sort_natural: bool = true;
 
     pub var imported: bool = false;
+    pub var binreader: bool = false;
     pub var can_delete: ?bool = null;
     pub var can_shell: ?bool = null;
     pub var can_refresh: ?bool = null;
@@ -251,7 +276,11 @@ fn argConfig(args: *Args, opt: Args.Option) bool {
     else if (opt.is("--include-caches")) config.exclude_caches = false
     else if (opt.is("--exclude-kernfs")) config.exclude_kernfs = true
     else if (opt.is("--include-kernfs")) config.exclude_kernfs = false
-    else if (opt.is("--confirm-quit")) config.confirm_quit = true
+    else if (opt.is("--compress-level")) {
+        const val = args.arg();
+        config.complevel = std.fmt.parseInt(u8, val, 10) catch ui.die("Invalid number for --compress-level: {s}.\n", .{val});
+        if (config.complevel <= 0 or config.complevel > 20) ui.die("Invalid number for --compress-level: {s}.\n", .{val});
+    } else if (opt.is("--confirm-quit")) config.confirm_quit = true
     else if (opt.is("--no-confirm-quit")) config.confirm_quit = false
     else if (opt.is("--confirm-delete")) config.confirm_delete = true
     else if (opt.is("--no-confirm-delete")) config.confirm_delete = false
@@ -261,6 +290,9 @@ fn argConfig(args: *Args, opt: Args.Option) bool {
         else if (std.mem.eql(u8, val, "dark")) config.ui_color = .dark
         else if (std.mem.eql(u8, val, "dark-bg")) config.ui_color = .darkbg
         else ui.die("Unknown --color option: {s}.\n", .{val});
+    } else if (opt.is("-t") or opt.is("--threads")) {
+        const val = args.arg();
+        config.threads = std.fmt.parseInt(u8, val, 10) catch ui.die("Invalid number of --threads: {s}.\n", .{val});
     } else return false;
     return true;
 }
@@ -274,10 +306,10 @@ fn tryReadArgsFile(path: [:0]const u8) void {
     defer f.close();
 
     var arglist = std.ArrayList([:0]const u8).init(allocator);
-    
+
     var rd_ = std.io.bufferedReader(f.reader());
     const rd = rd_.reader();
-    
+
     var line_buf: [4096]u8 = undefined;
     var line_fbs = std.io.fixedBufferStream(&line_buf);
     const line_writer = line_fbs.writer();
@@ -324,6 +356,7 @@ fn help() noreturn {
     \\  -v,-V,--version            Print version
     \\  -x                         Same filesystem
     \\  -e                         Enable extended information
+    \\  -t NUM                     Number of threads to use
     \\  -r                         Read only
     \\  -o FILE                    Export scanned directory to FILE
     \\  -f FILE                    Import scanned directory from FILE
@@ -349,10 +382,6 @@ fn spawnShell() void {
     ui.deinit();
     defer ui.init();
 
-    var path = std.ArrayList(u8).init(allocator);
-    defer path.deinit();
-    browser.dir_parent.fmtPath(true, &path);
-
     var env = std.process.getEnvMap(allocator) catch unreachable;
     defer env.deinit();
     // NCDU_LEVEL can only count to 9, keeps the implementation simple.
@@ -367,7 +396,7 @@ fn spawnShell() void {
 
     const shell = std.posix.getenvZ("NCDU_SHELL") orelse std.posix.getenvZ("SHELL") orelse "/bin/sh";
     var child = std.process.Child.init(&.{shell}, allocator);
-    child.cwd = path.items;
+    child.cwd = browser.dir_path;
     child.env_map = &env;
 
     const stdin = std.io.getStdIn();
@@ -423,7 +452,27 @@ fn readExcludeFile(path: [:0]const u8) !void {
     }
 }
 
+fn readImport(path: [:0]const u8) !void {
+    const fd =
+        if (std.mem.eql(u8, "-", path)) std.io.getStdIn()
+        else try std.fs.cwd().openFileZ(path, .{});
+    errdefer fd.close();
+
+    // TODO: While we're at it, recognize and handle compressed JSON
+    var buf: [8]u8 = undefined;
+    try fd.reader().readNoEof(&buf);
+    if (std.mem.eql(u8, &buf, bin_export.SIGNATURE)) {
+        try bin_reader.open(fd);
+        config.binreader = true;
+    } else {
+        json_import.import(fd, &buf);
+        fd.close();
+    }
+}
+
 pub fn main() void {
+    ui.main_thread = std.Thread.getCurrentId();
+
     // Grab thousands_sep from the current C locale.
     _ = c.setlocale(c.LC_ALL, "");
     if (c.localeconv()) |locale| {
@@ -456,9 +505,10 @@ pub fn main() void {
         }
     }
 
-    var scan_dir: ?[]const u8 = null;
+    var scan_dir: ?[:0]const u8 = null;
     var import_file: ?[:0]const u8 = null;
-    var export_file: ?[:0]const u8 = null;
+    var export_json: ?[:0]const u8 = null;
+    var export_bin: ?[:0]const u8 = null;
     var quit_after_scan = false;
     {
         const arglist = std.process.argsAlloc(allocator) catch unreachable;
@@ -474,8 +524,10 @@ pub fn main() void {
             }
             if (opt.is("-h") or opt.is("-?") or opt.is("--help")) help()
             else if (opt.is("-v") or opt.is("-V") or opt.is("--version")) version()
-            else if (opt.is("-o") and export_file != null) ui.die("The -o flag can only be given once.\n", .{})
-            else if (opt.is("-o")) export_file = allocator.dupeZ(u8, args.arg()) catch unreachable
+            else if (opt.is("-o") and (export_json != null or export_bin != null)) ui.die("The -o flag can only be given once.\n", .{})
+            else if (opt.is("-o")) export_json = allocator.dupeZ(u8, args.arg()) catch unreachable
+            else if (opt.is("-O") and (export_json != null or export_bin != null)) ui.die("The -O flag can only be given once.\n", .{})
+            else if (opt.is("-O")) export_bin = allocator.dupeZ(u8, args.arg()) catch unreachable
             else if (opt.is("-f") and import_file != null) ui.die("The -f flag can only be given once.\n", .{})
             else if (opt.is("-f")) import_file = allocator.dupeZ(u8, args.arg()) catch unreachable
             else if (opt.is("--ignore-config")) {}
@@ -485,6 +537,8 @@ pub fn main() void {
         }
     }
 
+    if (config.threads == 0) config.threads = std.Thread.getCpuCount() catch 1;
+
     if (@import("builtin").os.tag != .linux and config.exclude_kernfs)
         ui.die("The --exclude-kernfs flag is currently only supported on Linux.\n", .{});
 
@@ -493,30 +547,47 @@ pub fn main() void {
     const out_tty = stdout.isTty();
     const in_tty = stdin.isTty();
     if (config.scan_ui == null) {
-        if (export_file) |f| {
+        if (export_json orelse export_bin) |f| {
             if (!out_tty or std.mem.eql(u8, f, "-")) config.scan_ui = .none
             else config.scan_ui = .line;
         } else config.scan_ui = .full;
     }
-    if (!in_tty and import_file == null and export_file == null)
+    if (!in_tty and import_file == null and export_json == null and export_bin == null and !quit_after_scan)
         ui.die("Standard input is not a TTY. Did you mean to import a file using '-f -'?\n", .{});
-    config.nc_tty = !in_tty or (if (export_file) |f| std.mem.eql(u8, f, "-") else false);
+    config.nc_tty = !in_tty or (if (export_json orelse export_bin) |f| std.mem.eql(u8, f, "-") else false);
 
     event_delay_timer = std.time.Timer.start() catch unreachable;
     defer ui.deinit();
 
-    const out_file = if (export_file) |f| (
-        if (std.mem.eql(u8, f, "-")) stdout
-        else std.fs.cwd().createFileZ(f, .{})
-             catch |e| ui.die("Error opening export file: {s}.\n", .{ui.errorString(e)})
-    ) else null;
+    if (export_json) |f| {
+        const file =
+            if (std.mem.eql(u8, f, "-")) stdout
+            else std.fs.cwd().createFileZ(f, .{})
+                 catch |e| ui.die("Error opening export file: {s}.\n", .{ui.errorString(e)});
+        json_export.setupOutput(file);
+        sink.global.sink = .json;
+    } else if (export_bin) |f| {
+        const file =
+            if (std.mem.eql(u8, f, "-")) stdout
+            else std.fs.cwd().createFileZ(f, .{})
+                 catch |e| ui.die("Error opening export file: {s}.\n", .{ui.errorString(e)});
+        bin_export.setupOutput(file);
+        sink.global.sink = .bin;
+    }
 
     if (import_file) |f| {
-        scan.importRoot(f, out_file);
+        readImport(f) catch |e| ui.die("Error reading file '{s}': {s}.\n", .{f, ui.errorString(e)});
         config.imported = true;
-    } else scan.scanRoot(scan_dir orelse ".", out_file)
-           catch |e| ui.die("Error opening directory: {s}.\n", .{ui.errorString(e)});
-    if (quit_after_scan or out_file != null) return;
+        if (config.binreader and (export_json != null or export_bin != null))
+            bin_reader.import();
+    } else {
+        var buf = [_]u8{0} ** (std.fs.MAX_PATH_BYTES+1);
+        const path =
+            if (std.posix.realpathZ(scan_dir orelse ".", buf[0..buf.len-1])) |p| buf[0..p.len:0]
+            else |_| (scan_dir orelse ".");
+        scan.scan(path) catch |e| ui.die("Error opening directory: {s}.\n", .{ui.errorString(e)});
+    }
+    if (quit_after_scan or export_json != null or export_bin != null) return;
 
     config.can_shell = config.can_shell orelse !config.imported;
     config.can_delete = config.can_delete orelse !config.imported;
@@ -525,15 +596,21 @@ pub fn main() void {
     config.scan_ui = .full; // in case we're refreshing from the UI, always in full mode.
     ui.init();
     state = .browse;
-    browser.dir_parent = model.root;
-    browser.loadDir(null);
+    browser.initRoot();
 
     while (true) {
         switch (state) {
             .refresh => {
-                scan.scan();
+                var full_path = std.ArrayList(u8).init(allocator);
+                defer full_path.deinit();
+                mem_sink.global.root.?.fmtPath(true, &full_path);
+                scan.scan(util.arrayListBufZ(&full_path)) catch {
+                    sink.global.last_error = allocator.dupeZ(u8, full_path.items) catch unreachable;
+                    sink.global.state = .err;
+                    while (state == .refresh) handleEvent(true, true);
+                };
                 state = .browse;
-                browser.loadDir(null);
+                browser.loadDir(0);
             },
             .shell => {
                 spawnShell();
@@ -542,22 +619,24 @@ pub fn main() void {
             .delete => {
                 const next = delete.delete();
                 state = .browse;
-                browser.loadDir(next);
+                browser.loadDir(if (next) |n| n.nameHash() else 0);
             },
             else => handleEvent(true, false)
         }
     }
 }
 
-var event_delay_timer: std.time.Timer = undefined;
+pub var event_delay_timer: std.time.Timer = undefined;
 
 // Draw the screen and handle the next input event.
 // In non-blocking mode, screen drawing is rate-limited to keep this function fast.
 pub fn handleEvent(block: bool, force_draw: bool) void {
+    while (ui.oom_threads.load(.monotonic) > 0) ui.oom();
+
     if (block or force_draw or event_delay_timer.read() > config.update_delay) {
         if (ui.inited) _ = ui.c.erase();
         switch (state) {
-            .scan, .refresh => scan.draw(),
+            .scan, .refresh => sink.draw(),
             .browse => browser.draw(),
             .delete => delete.draw(),
             .shell => unreachable,
@@ -576,7 +655,7 @@ pub fn handleEvent(block: bool, force_draw: bool) void {
         if (ch == 0) return;
         if (ch == -1) return handleEvent(firstblock, true);
         switch (state) {
-            .scan, .refresh => scan.keyInput(ch),
+            .scan, .refresh => sink.keyInput(ch),
             .browse => browser.keyInput(ch),
             .delete => delete.keyInput(ch),
             .shell => unreachable,
