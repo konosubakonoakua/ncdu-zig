@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 const std = @import("std");
+const c = @import("c.zig").c;
 
 // Cast any integer type to the target type, clamping the value to the supported maximum if necessary.
 pub fn castClamp(comptime T: type, x: anytype) T {
@@ -169,4 +170,31 @@ test "strnatcmp" {
         for (0..i) |j| try eq(strnatcmp(w[i], w[j]), .gt);
         for (i+1..w.len) |j| try eq(strnatcmp(w[i], w[j]), .lt);
     }
+}
+
+
+pub fn expanduser(path: []const u8, alloc: std.mem.Allocator) ![:0]u8 {
+    if (path.len == 0 or path[0] != '~') return alloc.dupeZ(u8, path);
+
+    const len = std.mem.indexOfScalar(u8, path, '/') orelse path.len;
+    const home_raw = blk: {
+        const pwd = pwd: {
+            if (len == 1) {
+                if (std.posix.getenvZ("HOME")) |p| break :blk p;
+                break :pwd c.getpwuid(c.getuid());
+            } else {
+                const name = try alloc.dupeZ(u8, path[1..len]);
+                defer alloc.free(name);
+                break :pwd c.getpwnam(name.ptr);
+            }
+        };
+        if (pwd != null)
+            if (@as(*c.struct_passwd, pwd).pw_dir) |p|
+                break :blk std.mem.span(p);
+        return alloc.dupeZ(u8, path);
+    };
+    const home = std.mem.trimRight(u8, home_raw, "/");
+
+    if (home.len == 0 and path.len == len) return alloc.dupeZ(u8, "/");
+    return try std.fmt.allocPrintZ(alloc, "{s}{s}", .{ home, path[len..] });
 }

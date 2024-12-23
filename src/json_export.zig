@@ -7,6 +7,7 @@ const model = @import("model.zig");
 const sink = @import("sink.zig");
 const util = @import("util.zig");
 const ui = @import("ui.zig");
+const c = @import("c.zig").c;
 
 // JSON output is necessarily single-threaded and items MUST be added depth-first.
 
@@ -14,8 +15,55 @@ pub const global = struct {
     var writer: *Writer = undefined;
 };
 
+
+const ZstdWriter = struct {
+    ctx: ?*c.ZSTD_CStream,
+    out: c.ZSTD_outBuffer,
+    outbuf: [c.ZSTD_BLOCKSIZE_MAX + 64]u8,
+
+    fn create() *ZstdWriter {
+        const w = main.allocator.create(ZstdWriter) catch unreachable;
+        w.out = .{
+            .dst = &w.outbuf,
+            .size = w.outbuf.len,
+            .pos = 0,
+        };
+        while (true) {
+            w.ctx = c.ZSTD_createCStream();
+            if (w.ctx != null) break;
+            ui.oom();
+        }
+        _ = c.ZSTD_CCtx_setParameter(w.ctx, c.ZSTD_c_compressionLevel, main.config.complevel);
+        return w;
+    }
+
+    fn destroy(w: *ZstdWriter) void {
+        _ = c.ZSTD_freeCStream(w.ctx);
+        main.allocator.destroy(w);
+    }
+
+    fn write(w: *ZstdWriter, f: std.fs.File, in: []const u8, flush: bool) !void {
+        var arg = c.ZSTD_inBuffer{
+            .src = in.ptr,
+            .size = in.len,
+            .pos = 0,
+        };
+        while (true) {
+            const v = c.ZSTD_compressStream2(w.ctx, &w.out, &arg, if (flush) c.ZSTD_e_end else c.ZSTD_e_continue);
+            if (c.ZSTD_isError(v) != 0) return error.ZstdCompressError;
+            if (flush or w.out.pos > w.outbuf.len / 2) {
+                try f.writeAll(w.outbuf[0..w.out.pos]);
+                w.out.pos = 0;
+            }
+            if (!flush and arg.pos == arg.size) break;
+            if (flush and v == 0) break;
+        }
+    }
+};
+
 pub const Writer = struct {
     fd: std.fs.File,
+    zstd: ?*ZstdWriter = null,
     // Must be large enough to hold PATH_MAX*6 plus some overhead.
     // (The 6 is because, in the worst case, every byte expands to a "\u####"
     // escape, and we do pessimistic estimates here in order to avoid checking
@@ -29,7 +77,8 @@ pub const Writer = struct {
         // This can only really happen when the root path exceeds PATH_MAX,
         // in which case we would probably have error'ed out earlier anyway.
         if (bytes > ctx.buf.len) ui.die("Error writing JSON export: path too long.\n", .{});
-        ctx.fd.writeAll(ctx.buf[0..ctx.off]) catch |e|
+        const buf = ctx.buf[0..ctx.off];
+        (if (ctx.zstd) |z| z.write(ctx.fd, buf, bytes == 0) else ctx.fd.writeAll(buf)) catch |e|
             ui.die("Error writing to file: {s}.\n", .{ ui.errorString(e) });
         ctx.off = 0;
     }
@@ -92,6 +141,7 @@ pub const Writer = struct {
     fn init(out: std.fs.File) *Writer {
         var ctx = main.allocator.create(Writer) catch unreachable;
         ctx.* = .{ .fd = out };
+        if (main.config.compress) ctx.zstd = ZstdWriter.create();
         ctx.write("[1,2,{\"progname\":\"ncdu\",\"progver\":\"" ++ main.program_version ++ "\",\"timestamp\":");
         ctx.writeUint(@intCast(@max(0, std.time.timestamp())));
         ctx.writeByte('}');
@@ -210,6 +260,7 @@ pub fn createRoot(path: []const u8, stat: *const sink.Stat) Dir {
 pub fn done() void {
     global.writer.write("]\n");
     global.writer.flush(0);
+    if (global.writer.zstd) |z| z.destroy();
     global.writer.fd.close();
     main.allocator.destroy(global.writer);
 }

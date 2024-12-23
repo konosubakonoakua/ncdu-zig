@@ -7,6 +7,7 @@ const model = @import("model.zig");
 const ui = @import("ui.zig");
 const browser = @import("browser.zig");
 const util = @import("util.zig");
+const c = @import("c.zig").c;
 
 var parent: *model.Dir = undefined;
 var entry: *model.Entry = undefined;
@@ -178,11 +179,11 @@ pub fn draw() void {
 pub fn keyInput(ch: i32) void {
     switch (state) {
         .confirm => switch (ch) {
-            'h', ui.c.KEY_LEFT => confirm = switch (confirm) {
+            'h', c.KEY_LEFT => confirm = switch (confirm) {
                 .ignore => .no,
                 else => .yes,
             },
-            'l', ui.c.KEY_RIGHT => confirm = switch (confirm) {
+            'l', c.KEY_RIGHT => confirm = switch (confirm) {
                 .yes => .no,
                 else => .ignore,
             },
@@ -202,11 +203,11 @@ pub fn keyInput(ch: i32) void {
                 main.state = .browse;
         },
         .err => switch (ch) {
-            'h', ui.c.KEY_LEFT => error_option = switch (error_option) {
+            'h', c.KEY_LEFT => error_option = switch (error_option) {
                 .all => .ignore,
                 else => .abort,
             },
-            'l', ui.c.KEY_RIGHT => error_option = switch (error_option) {
+            'l', c.KEY_RIGHT => error_option = switch (error_option) {
                 .abort => .ignore,
                 else => .all,
             },

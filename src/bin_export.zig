@@ -7,9 +7,7 @@ const model = @import("model.zig");
 const sink = @import("sink.zig");
 const util = @import("util.zig");
 const ui = @import("ui.zig");
-
-extern fn ZSTD_compress(dst: ?*anyopaque, dstCapacity: usize, src: ?*const anyopaque, srcSize: usize, compressionLevel: c_int) usize;
-extern fn ZSTD_isError(code: usize) c_uint;
+const c = @import("c.zig").c;
 
 pub const global = struct {
     var fd: std.fs.File = undefined;
@@ -65,9 +63,6 @@ inline fn blockHeader(id: u4, len: u28) [4]u8 { return bigu32((@as(u32, id) << 2
 
 inline fn cborByte(major: CborMajor, arg: u5) u8 { return (@as(u8, @intFromEnum(major)) << 5) | arg; }
 
-// ZSTD_COMPRESSBOUND(), assuming input does not exceed ZSTD_MAX_INPUT_SIZE
-fn compressBound(size: usize) usize { return size + (size>>8) + (if (size < (128<<10)) ((128<<10) - size) >> 11 else 0); }
-
 
 // (Uncompressed) data block size.
 // Start with 64k, then use increasingly larger block sizes as the export file
@@ -77,7 +72,8 @@ fn compressBound(size: usize) usize { return size + (size>>8) + (if (size < (128
 fn blockSize(num: u32) usize {
     //                        block size    uncompressed data in this num range
     //                 # mil      # KiB         # GiB
-    return if (num < ( 1<<20))   64<<10  //    64
+    return main.config.export_block_size
+    orelse if (num < ( 1<<20))   64<<10  //    64
       else if (num < ( 2<<20))  128<<10  //   128
       else if (num < ( 4<<20))  256<<10  //   512
       else if (num < ( 8<<20))  512<<10  //  2048
@@ -100,8 +96,8 @@ pub const Thread = struct {
 
     fn compressZstd(in: []const u8, out: []u8) usize {
         while (true) {
-            const r = ZSTD_compress(out.ptr, out.len, in.ptr, in.len, main.config.complevel);
-            if (ZSTD_isError(r) == 0) return r;
+            const r = c.ZSTD_compress(out.ptr, out.len, in.ptr, in.len, main.config.complevel);
+            if (c.ZSTD_isError(r) == 0) return r;
             ui.oom(); // That *ought* to be the only reason the above call can fail.
         }
     }
@@ -110,7 +106,7 @@ pub const Thread = struct {
         var out = std.ArrayList(u8).init(main.allocator);
         if (t.block_num == std.math.maxInt(u32) or t.off == 0) return out;
 
-        out.ensureTotalCapacityPrecise(12 + compressBound(t.off)) catch unreachable;
+        out.ensureTotalCapacityPrecise(12 + @as(usize, @intCast(c.ZSTD_COMPRESSBOUND(@as(c_int, @intCast(t.off)))))) catch unreachable;
         out.items.len = out.capacity;
         const bodylen = compressZstd(t.buf[0..t.off], out.items[8..]);
         out.items.len = 12 + bodylen;
@@ -395,7 +391,7 @@ pub const Dir = struct {
             p.last_sub = t.itemStart(.dir, p.last_sub, name);
         } else {
             d.countLinks(null);
-            global.root_itemref = t.itemStart(.dir, 0, name);
+            global.root_itemref = t.itemStart(.dir, null, name);
         }
         d.inodes.deinit();
 

@@ -1,7 +1,7 @@
 // SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 // SPDX-License-Identifier: MIT
 
-pub const program_version = "2.6";
+pub const program_version = "2.7";
 
 const std = @import("std");
 const model = @import("model.zig");
@@ -18,7 +18,7 @@ const browser = @import("browser.zig");
 const delete = @import("delete.zig");
 const util = @import("util.zig");
 const exclude = @import("exclude.zig");
-const c = @cImport(@cInclude("locale.h"));
+const c = @import("c.zig").c;
 
 test "imports" {
     _ = model;
@@ -81,6 +81,8 @@ pub const config = struct {
     pub var exclude_patterns: std.ArrayList([:0]const u8) = std.ArrayList([:0]const u8).init(allocator);
     pub var threads: usize = 1;
     pub var complevel: u8 = 4;
+    pub var compress: bool = false;
+    pub var export_block_size: ?usize = null;
 
     pub var update_delay: u64 = 100*std.time.ns_per_ms;
     pub var scan_ui: ?enum { none, line, full } = null;
@@ -192,7 +194,7 @@ const Args = struct {
     }
 };
 
-fn argConfig(args: *Args, opt: Args.Option) bool {
+fn argConfig(args: *Args, opt: Args.Option, infile: bool) bool {
     if (opt.is("-q") or opt.is("--slow-ui-updates")) config.update_delay = 2*std.time.ns_per_s
     else if (opt.is("--fast-ui-updates")) config.update_delay = 100*std.time.ns_per_ms
     else if (opt.is("-x") or opt.is("--one-file-system")) config.same_fs = true
@@ -268,18 +270,29 @@ fn argConfig(args: *Args, opt: Args.Option) bool {
     else if (opt.is("--no-si")) config.si = false
     else if (opt.is("-L") or opt.is("--follow-symlinks")) config.follow_symlinks = true
     else if (opt.is("--no-follow-symlinks")) config.follow_symlinks = false
-    else if (opt.is("--exclude")) exclude.addPattern(args.arg())
-    else if (opt.is("-X") or opt.is("--exclude-from")) {
-        const arg = args.arg();
+    else if (opt.is("--exclude")) {
+        const arg = if (infile) (util.expanduser(args.arg(), allocator) catch unreachable) else args.arg();
+        defer if (infile) allocator.free(arg);
+        exclude.addPattern(arg);
+    } else if (opt.is("-X") or opt.is("--exclude-from")) {
+        const arg = if (infile) (util.expanduser(args.arg(), allocator) catch unreachable) else args.arg();
+        defer if (infile) allocator.free(arg);
         readExcludeFile(arg) catch |e| ui.die("Error reading excludes from {s}: {s}.\n", .{ arg, ui.errorString(e) });
     } else if (opt.is("--exclude-caches")) config.exclude_caches = true
     else if (opt.is("--include-caches")) config.exclude_caches = false
     else if (opt.is("--exclude-kernfs")) config.exclude_kernfs = true
     else if (opt.is("--include-kernfs")) config.exclude_kernfs = false
+    else if (opt.is("-c") or opt.is("--compress")) config.compress = true
+    else if (opt.is("--no-compress")) config.compress = false
     else if (opt.is("--compress-level")) {
         const val = args.arg();
         config.complevel = std.fmt.parseInt(u8, val, 10) catch ui.die("Invalid number for --compress-level: {s}.\n", .{val});
         if (config.complevel <= 0 or config.complevel > 20) ui.die("Invalid number for --compress-level: {s}.\n", .{val});
+    } else if (opt.is("--export-block-size")) {
+        const val = args.arg();
+        const num = std.fmt.parseInt(u14, val, 10) catch ui.die("Invalid number for --export-block-size: {s}.\n", .{val});
+        if (num < 4 or num > 16000) ui.die("Invalid number for --export-block-size: {s}.\n", .{val});
+        config.export_block_size = @as(usize, num) * 1024;
     } else if (opt.is("--confirm-quit")) config.confirm_quit = true
     else if (opt.is("--no-confirm-quit")) config.confirm_quit = false
     else if (opt.is("--confirm-delete")) config.confirm_delete = true
@@ -332,7 +345,7 @@ fn tryReadArgsFile(path: [:0]const u8) void {
 
     var args = Args.init(arglist.items);
     while (args.next()) |opt| {
-        if (!argConfig(&args, opt))
+        if (!argConfig(&args, opt, true))
             ui.die("Unrecognized option in config file '{s}': {s}.\nRun with --ignore-config to skip reading config files.\n", .{path, opt.val});
     }
     for (arglist.items) |i| allocator.free(i);
@@ -458,7 +471,6 @@ fn readImport(path: [:0]const u8) !void {
         else try std.fs.cwd().openFileZ(path, .{});
     errdefer fd.close();
 
-    // TODO: While we're at it, recognize and handle compressed JSON
     var buf: [8]u8 = undefined;
     try fd.reader().readNoEof(&buf);
     if (std.mem.eql(u8, &buf, bin_export.SIGNATURE)) {
@@ -532,7 +544,7 @@ pub fn main() void {
             else if (opt.is("-f")) import_file = allocator.dupeZ(u8, args.arg()) catch unreachable
             else if (opt.is("--ignore-config")) {}
             else if (opt.is("--quit-after-scan")) quit_after_scan = true // undocumented feature to help with benchmarking scan/import
-            else if (argConfig(&args, opt)) {}
+            else if (argConfig(&args, opt, false)) {}
             else ui.die("Unrecognized option '{s}'.\n", .{opt.val});
         }
     }
@@ -634,14 +646,14 @@ pub fn handleEvent(block: bool, force_draw: bool) void {
     while (ui.oom_threads.load(.monotonic) > 0) ui.oom();
 
     if (block or force_draw or event_delay_timer.read() > config.update_delay) {
-        if (ui.inited) _ = ui.c.erase();
+        if (ui.inited) _ = c.erase();
         switch (state) {
             .scan, .refresh => sink.draw(),
             .browse => browser.draw(),
             .delete => delete.draw(),
             .shell => unreachable,
         }
-        if (ui.inited) _ = ui.c.refresh();
+        if (ui.inited) _ = c.refresh();
         event_delay_timer.reset();
     }
     if (!ui.inited) {

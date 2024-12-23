@@ -7,6 +7,54 @@ const util = @import("util.zig");
 const model = @import("model.zig");
 const sink = @import("sink.zig");
 const ui = @import("ui.zig");
+const c = @import("c.zig").c;
+
+
+const ZstdReader = struct {
+    ctx: ?*c.ZSTD_DStream,
+    in: c.ZSTD_inBuffer,
+    lastret: usize = 0,
+    inbuf: [c.ZSTD_BLOCKSIZE_MAX + 16]u8, // This ZSTD_DStreamInSize() + a little bit extra
+
+    fn create(head: []const u8) *ZstdReader {
+        const r = main.allocator.create(ZstdReader) catch unreachable;
+        @memcpy(r.inbuf[0..head.len], head);
+        r.in = .{
+            .src = &r.inbuf,
+            .size = head.len,
+            .pos = 0,
+        };
+        while (true) {
+            r.ctx = c.ZSTD_createDStream();
+            if (r.ctx != null) break;
+            ui.oom();
+        }
+        return r;
+    }
+
+    fn destroy(r: *ZstdReader) void {
+        _ = c.ZSTD_freeDStream(r.ctx);
+        main.allocator.destroy(r);
+    }
+
+    fn read(r: *ZstdReader, f: std.fs.File, out: []u8) !usize {
+        while (true) {
+            if (r.in.size == r.in.pos) {
+                r.in.pos = 0;
+                r.in.size = try f.read(&r.inbuf);
+                if (r.in.size == 0) {
+                    if (r.lastret == 0) return 0;
+                    return error.ZstdDecompressError; // Early EOF
+                }
+            }
+
+            var arg = c.ZSTD_outBuffer{ .dst = out.ptr, .size = out.len, .pos = 0 };
+            r.lastret = c.ZSTD_decompressStream(r.ctx, &arg, &r.in);
+            if (c.ZSTD_isError(r.lastret) != 0) return error.ZstdDecompressError;
+            if (arg.pos > 0) return arg.pos;
+        }
+    }
+};
 
 
 // Using a custom JSON parser here because, while std.json is great, it does
@@ -16,11 +64,12 @@ const ui = @import("ui.zig");
 
 const Parser = struct {
     rd: std.fs.File,
+    zstd: ?*ZstdReader = null,
     rdoff: usize = 0,
     rdsize: usize = 0,
     byte: u64 = 1,
     line: u64 = 1,
-    buf: [16*1024]u8 = undefined,
+    buf: [129*1024]u8 = undefined,
 
     fn die(p: *Parser, str: []const u8) noreturn {
         ui.die("Error importing file on line {}:{}: {s}.\n", .{ p.line, p.byte, str });
@@ -36,9 +85,10 @@ const Parser = struct {
     fn fill(p: *Parser) void {
         @setCold(true);
         p.rdoff = 0;
-        p.rdsize = p.rd.read(&p.buf) catch |e| switch (e) {
+        p.rdsize = (if (p.zstd) |z| z.read(p.rd, &p.buf) else p.rd.read(&p.buf)) catch |e| switch (e) {
             error.IsDir => p.die("not a file"), // should be detected at open() time, but no flag for that...
             error.SystemResources => p.die("out of memory"),
+            error.ZstdDecompressError => p.die("decompression error"),
             else => p.die("I/O error"),
         };
     }
@@ -99,9 +149,16 @@ const Parser = struct {
                     'r' => if (n < buf.len) { buf[n] = 0xd; n += 1; },
                     't' => if (n < buf.len) { buf[n] = 0x9; n += 1; },
                     'u' => {
-                        const char = (p.hexdig()<<12) + (p.hexdig()<<8) + (p.hexdig()<<4) + p.hexdig();
+                        const first = (p.hexdig()<<12) + (p.hexdig()<<8) + (p.hexdig()<<4) + p.hexdig();
+                        var unit = @as(u21, first);
+                        if (std.unicode.utf16IsLowSurrogate(first)) p.die("Unexpected low surrogate");
+                        if (std.unicode.utf16IsHighSurrogate(first)) {
+                            p.expectLit("\\u");
+                            const second = (p.hexdig()<<12) + (p.hexdig()<<8) + (p.hexdig()<<4) + p.hexdig();
+                            unit = std.unicode.utf16DecodeSurrogatePair(&.{first, second}) catch p.die("Invalid low surrogate");
+                        }
                         if (n + 6 < buf.len)
-                            n += std.unicode.utf8Encode(char, buf[n..n+5]) catch unreachable;
+                            n += std.unicode.utf8Encode(unit, buf[n..n+5]) catch unreachable;
                     },
                     else => p.die("invalid escape sequence"),
                 },
@@ -475,8 +532,15 @@ pub fn import(fd: std.fs.File, head: []const u8) void {
     const sink_threads = sink.createThreads(1);
     defer sink.done();
 
-    var p = Parser{.rd = fd, .rdsize = head.len};
-    @memcpy(p.buf[0..head.len], head);
+    var p = Parser{.rd = fd};
+    defer if (p.zstd) |z| z.destroy();
+
+    if (head.len >= 4 and std.mem.eql(u8, head[0..4], "\x28\xb5\x2f\xfd")) {
+        p.zstd = ZstdReader.create(head);
+    } else {
+        p.rdsize = head.len;
+        @memcpy(p.buf[0..head.len], head);
+    }
     p.array();
     if (p.uint(u16) != 1) p.die("incompatible major format version");
     if (!p.elem(false)) p.die("expected array element");

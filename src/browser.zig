@@ -9,7 +9,7 @@ const mem_sink = @import("mem_sink.zig");
 const bin_reader = @import("bin_reader.zig");
 const delete = @import("delete.zig");
 const ui = @import("ui.zig");
-const c = @cImport(@cInclude("time.h"));
+const c = @import("c.zig").c;
 const util = @import("util.zig");
 
 // Currently opened directory.
@@ -644,8 +644,8 @@ const info = struct {
     fn keyInput(ch: i32) bool {
         if (entry.?.pack.etype == .link) {
             switch (ch) {
-                '1', 'h', ui.c.KEY_LEFT => { set(entry, .info); return true; },
-                '2', 'l', ui.c.KEY_RIGHT => { set(entry, .links); return true; },
+                '1', 'h', c.KEY_LEFT => { set(entry, .info); return true; },
+                '2', 'l', c.KEY_RIGHT => { set(entry, .links); return true; },
                 else => {},
             }
         }
@@ -802,9 +802,9 @@ const help = struct {
             '1' => tab = .keys,
             '2' => tab = .flags,
             '3' => tab = .about,
-            'h', ui.c.KEY_LEFT => tab = if (tab == .about) .flags else .keys,
-            'l', ui.c.KEY_RIGHT => tab = if (tab == .keys) .flags else .about,
-            'j', ' ', ui.c.KEY_DOWN, ui.c.KEY_NPAGE => {
+            'h', c.KEY_LEFT => tab = if (tab == .about) .flags else .keys,
+            'l', c.KEY_RIGHT => tab = if (tab == .keys) .flags else .about,
+            'j', ' ', c.KEY_DOWN, c.KEY_NPAGE => {
                 const max = switch (tab) {
                     .keys => keys.len/2 - keylines,
                     else => @as(u32, 0),
@@ -812,7 +812,7 @@ const help = struct {
                 if (offset < max)
                     offset += 1;
             },
-            'k', ui.c.KEY_UP, ui.c.KEY_PPAGE => { if (offset > 0) offset -= 1; },
+            'k', c.KEY_UP, c.KEY_PPAGE => { if (offset > 0) offset -= 1; },
             else => state = .main,
         }
     }
@@ -917,16 +917,16 @@ fn sortToggle(col: main.config.SortCol, default_order: main.config.SortOrder) vo
 
 fn keyInputSelection(ch: i32, idx: *usize, len: usize, page: u32) bool {
     switch (ch) {
-        'j', ui.c.KEY_DOWN => {
+        'j', c.KEY_DOWN => {
             if (idx.*+1 < len) idx.* += 1;
         },
-        'k', ui.c.KEY_UP => {
+        'k', c.KEY_UP => {
             if (idx.* > 0) idx.* -= 1;
         },
-        ui.c.KEY_HOME => idx.* = 0,
-        ui.c.KEY_END, ui.c.KEY_LL => idx.* = len -| 1,
-        ui.c.KEY_PPAGE => idx.* = idx.* -| page,
-        ui.c.KEY_NPAGE => idx.* = @min(len -| 1, idx.* + page),
+        c.KEY_HOME => idx.* = 0,
+        c.KEY_END, c.KEY_LL => idx.* = len -| 1,
+        c.KEY_PPAGE => idx.* = idx.* -| page,
+        c.KEY_NPAGE => idx.* = @min(len -| 1, idx.* + page),
         else => return false,
     }
     return true;
@@ -1017,7 +1017,7 @@ pub fn keyInput(ch: i32) void {
         },
 
         // Navigation
-        10, 'l', ui.c.KEY_RIGHT => {
+        10, 'l', c.KEY_RIGHT => {
             if (dir_items.items.len == 0) {
             } else if (dir_items.items[cursor_idx]) |e| {
                 if (e.dir()) |d| {
@@ -1032,7 +1032,7 @@ pub fn keyInput(ch: i32) void {
                 state = .main;
             }
         },
-        'h', '<', ui.c.KEY_BACKSPACE, ui.c.KEY_LEFT => {
+        'h', '<', c.KEY_BACKSPACE, c.KEY_LEFT => {
             if (dir_parents.items.len > 1) {
                 //const h = dir_parent.entry.nameHash();
                 enterParent();

@@ -8,13 +8,13 @@ const model = @import("model.zig");
 const sink = @import("sink.zig");
 const ui = @import("ui.zig");
 const exclude = @import("exclude.zig");
-const c_statfs = @cImport(@cInclude("sys/vfs.h"));
+const c = @import("c.zig").c;
 
 
 // This function only works on Linux
 fn isKernfs(dir: std.fs.Dir) bool {
-    var buf: c_statfs.struct_statfs = undefined;
-    if (c_statfs.fstatfs(dir.fd, &buf) != 0) return false; // silently ignoring errors isn't too nice.
+    var buf: c.struct_statfs = undefined;
+    if (c.fstatfs(dir.fd, &buf) != 0) return false; // silently ignoring errors isn't too nice.
     const iskern = switch (util.castTruncate(u32, buf.f_type)) {
         // These numbers are documented in the Linux 'statfs(2)' man page, so I assume they're stable.
         0x42494e4d, // BINFMTFS_MAGIC

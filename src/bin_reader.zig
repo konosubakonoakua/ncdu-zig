@@ -8,9 +8,7 @@ const util = @import("util.zig");
 const sink = @import("sink.zig");
 const ui = @import("ui.zig");
 const bin_export = @import("bin_export.zig");
-
-extern fn ZSTD_decompress(dst: ?*anyopaque, dstCapacity: usize, src: ?*const anyopaque, compressedSize: usize) usize;
-extern fn ZSTD_getFrameContentSize(src: ?*const anyopaque, srcSize: usize) c_ulonglong;
+const c = @import("c.zig").c;
 
 
 const CborMajor = bin_export.CborMajor;
@@ -103,11 +101,11 @@ fn readBlock(num: u32) []const u8 {
         catch |e| ui.die("Error reading from file: {s}\n", .{ui.errorString(e)});
     if (rdlen != buf.len) die();
 
-    const rawlen = ZSTD_getFrameContentSize(buf.ptr, buf.len);
+    const rawlen = c.ZSTD_getFrameContentSize(buf.ptr, buf.len);
     if (rawlen <= 0 or rawlen >= (1<<24)) die();
     block.data = main.allocator.alloc(u8, @intCast(rawlen)) catch unreachable;
 
-    const res = ZSTD_decompress(block.data.ptr, block.data.len, buf.ptr, buf.len);
+    const res = c.ZSTD_decompress(block.data.ptr, block.data.len, buf.ptr, buf.len);
     if (res != block.data.len) ui.die("Error decompressing block {} (expected {} got {})\n", .{ num, block.data.len, res });
 
     return block.data;

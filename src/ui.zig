@@ -6,16 +6,7 @@
 const std = @import("std");
 const main = @import("main.zig");
 const util = @import("util.zig");
-
-pub const c = @cImport({
-    @cDefine("_XOPEN_SOURCE", "1");
-    @cInclude("stdio.h");
-    @cInclude("string.h");
-    @cInclude("curses.h");
-    @cInclude("time.h");
-    @cInclude("wchar.h");
-    @cInclude("locale.h");
-});
+const c = @import("c.zig").c;
 
 pub var inited: bool = false;
 pub var main_thread: std.Thread.Id = undefined;

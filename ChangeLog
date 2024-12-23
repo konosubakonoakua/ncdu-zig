@@ -1,6 +1,15 @@
 # SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
+2.7 - 2024-11-19
+	- Still requires Zig 0.12 or 0.13
+	- Support transparent reading/writing of zstandard-compressed JSON
+	- Add `--compress` and `--export-block-size` options
+	- Perform tilde expansion on paths in the config file
+	- Fix JSON import of escaped UTF-16 surrogate pairs
+	- Fix incorrect field in root item when exporting to the binary format
+	- Add -Dstrip build flag
+
 2.6 - 2024-09-27
 	- Still requires Zig 0.12 or 0.13
 	- Add dependency on libzstd

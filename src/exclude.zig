@@ -3,7 +3,7 @@
 
 const std = @import("std");
 const main = @import("main.zig");
-const c = @cImport(@cInclude("fnmatch.h"));
+const c = @import("c.zig").c;
 
 // Reference:
 //   https://manned.org/glob.7

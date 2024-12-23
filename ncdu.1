@@ -1,6 +1,6 @@
 .\" SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 .\" SPDX-License-Identifier: MIT
-.Dd September 27, 2024
+.Dd November 19, 2024
 .Dt NCDU 1
 .Os
 .Sh NAME
@@ -21,7 +21,9 @@
 .Op Fl L , \-follow\-symlinks , \-no\-follow\-symlinks
 .Op Fl \-include\-kernfs , \-exclude\-kernfs
 .Op Fl t , \-threads Ar num
+.Op Fl c , \-compress , \-no\-compress
 .Op Fl \-compress\-level Ar num
+.Op Fl \-export\-block\-size Ar num
 .Op Fl 0 , 1 , 2
 .Op Fl q , \-slow\-ui\-updates , \-fast\-ui\-updates
 .Op Fl \-enable\-shell , \-disable\-shell
@@ -96,6 +98,11 @@ directory with many files.
 uncompressed, or a little over 100 KiB when compressed with gzip.
 This scales linearly, so be prepared to handle a few tens of megabytes when
 dealing with millions of files.
+.Pp
+Consider enabling
+.Fl c
+to output Zstandard-compressed JSON, which can significantly reduce size of the
+exported data.
 .Pp
 When running a multi-threaded scan or when scanning a directory tree that may
 not fit in memory, consider using
@@ -187,12 +194,36 @@ The binary format (see
 .Fl O )
 does not have this problem and supports efficient exporting with any number of
 threads.
+.El
+.
+.Ss Export Options
+These options affect behavior when exporting to file with the
+.Fl o
+or
+.Fl O
+options.
+.Bl -tag -width Ds
+.It Fl c , \-compress , \-no\-compress
+Enable or disable Zstandard compression when exporting to JSON (see
+.Fl o ) .
 .It Fl \-compress\-level Ar num
 Set the Zstandard compression level when using
 .Fl O
-to create a binary export.
+or
+.Fl c .
 Valid values are 1 (fastest) to 19 (slowest).
 Defaults to 4.
+.It Fl \-export\-block\-size Ar num
+Set the block size, in kibibytes, for the binary export format (see
+.Fl O ) .
+Larger blocks require more memory but result in better compression efficiency.
+This option can be combined with a higher
+.Fl \-compress\-level
+for even better compression.
+.Pp
+Accepted values are between 4 and 16000.
+The defaults is to start at 64 KiB and then gradually increase the block size
+for large exports.
 .El
 .
 .Ss Interface Options
@@ -487,34 +518,28 @@ Empty directory.
 .Sh EXAMPLES
 To scan and browse the directory you're currently in, all you need is a simple:
 .Dl ncdu
-If you want to scan a full filesystem, for example your root filesystem, then
-you'll want to use
+To scan a full filesystem, for example your root filesystem, you'll want to use
 .Fl x :
 .Dl ncdu \-x /
 .Pp
 Since scanning a large directory may take a while, you can scan a directory and
 export the results for later viewing:
 .Bd -literal -offset indent
-ncdu \-1xo\- / | gzip >export.gz
+ncdu \-1xO export.ncdu /
 # ...some time later:
-zcat export.gz | ncdu \-f\-
+ncdu \-f export.ncdu
 .Ed
 To export from a cron job, make sure to replace
 .Fl 1
 with
 .Fl 0
-to suppress any unnecessary output.
+to suppress unnecessary progress output.
 .Pp
 You can also export a directory and browse it once scanning is done:
-.Dl ncdu \-o\- | tee export.file | ./ncdu \-f\-
-The same is possible with gzip compression, but is a bit kludgey:
-.Dl ncdu \-o\- | gzip | tee export.gz | gunzip | ./ncdu \-f\-
+.Dl ncdu \-co\- | tee export.json.zst | ./ncdu \-f\-
 .Pp
 To scan a system remotely, but browse through the files locally:
-.Dl ssh \-C user@system ncdu \-o\- / | ./ncdu \-f\-
-The
-.Fl C
-option to ssh enables compression, which will be very useful over slow links.
+.Dl ssh user@system ncdu \-co\- / | ./ncdu \-f\-
 Remote scanning and local viewing has two major advantages when
 compared to running
 .Nm
