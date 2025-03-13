@@ -37,7 +37,7 @@ pub fn quit() noreturn {
 // no clue if ncurses will consistently report OOM, but we're not handling that
 // right now.
 pub fn oom() void {
-    @setCold(true);
+    @branchHint(.cold);
     if (main_thread == std.Thread.getCurrentId()) {
         const haveui = inited;
         deinit();
@@ -288,7 +288,7 @@ pub const Style = lbl: {
         };
     }
     break :lbl @Type(.{
-        .Enum = .{
+        .@"enum" = .{
             .tag_type = u8,
             .fields = &fields,
             .decls = &[_]std.builtin.Type.Declaration{},
@@ -419,7 +419,7 @@ pub const FmtSize = struct {
     pub fn fmt(v: u64) FmtSize {
         if (main.config.si) {
             if      (v < 1000)                    { return FmtSize.init("  B", v, 10, 1); }
-            else if (v < 999_950)                 { return FmtSize.init(" KB", v, 1, 100); }
+            else if (v < 999_950)                 { return FmtSize.init(" kB", v, 1, 100); }
             else if (v < 999_950_000)             { return FmtSize.init(" MB", v, 1, 100_000); }
             else if (v < 999_950_000_000)         { return FmtSize.init(" GB", v, 1, 100_000_000); }
             else if (v < 999_950_000_000_000)     { return FmtSize.init(" TB", v, 1, 100_000_000_000); }
@@ -452,11 +452,11 @@ test "fmtsize" {
     main.config.si = true;
     try FmtSize.fmt(            0).testEql("  0.0  B");
     try FmtSize.fmt(          999).testEql("999.0  B");
-    try FmtSize.fmt(         1000).testEql("  1.0 KB");
-    try FmtSize.fmt(         1049).testEql("  1.0 KB");
-    try FmtSize.fmt(         1050).testEql("  1.1 KB");
-    try FmtSize.fmt(      999_899).testEql("999.9 KB");
-    try FmtSize.fmt(      999_949).testEql("999.9 KB");
+    try FmtSize.fmt(         1000).testEql("  1.0 kB");
+    try FmtSize.fmt(         1049).testEql("  1.0 kB");
+    try FmtSize.fmt(         1050).testEql("  1.1 kB");
+    try FmtSize.fmt(      999_899).testEql("999.9 kB");
+    try FmtSize.fmt(      999_949).testEql("999.9 kB");
     try FmtSize.fmt(      999_950).testEql("  1.0 MB");
     try FmtSize.fmt(     1000_000).testEql("  1.0 MB");
     try FmtSize.fmt(  999_850_009).testEql("999.9 MB");

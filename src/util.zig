@@ -18,8 +18,8 @@ pub fn castClamp(comptime T: type, x: anytype) T {
 
 // Cast any integer type to the target type, truncating if necessary.
 pub fn castTruncate(comptime T: type, x: anytype) T {
-    const Ti = @typeInfo(T).Int;
-    const Xi = @typeInfo(@TypeOf(x)).Int;
+    const Ti = @typeInfo(T).int;
+    const Xi = @typeInfo(@TypeOf(x)).int;
     const nx: std.meta.Int(Ti.signedness, Xi.bits) = @bitCast(x);
     return if (Xi.bits > Ti.bits) @truncate(nx) else nx;
 }

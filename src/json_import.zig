@@ -83,7 +83,6 @@ const Parser = struct {
     }
 
     fn fill(p: *Parser) void {
-        @setCold(true);
         p.rdoff = 0;
         p.rdsize = (if (p.zstd) |z| z.read(p.rd, &p.buf) else p.rd.read(&p.buf)) catch |e| switch (e) {
             error.IsDir => p.die("not a file"), // should be detected at open() time, but no flag for that...
@@ -98,6 +97,7 @@ const Parser = struct {
     // (Returning a '?u8' here is nicer but kills performance by about +30%)
     fn nextByte(p: *Parser) u8 {
         if (p.rdoff == p.rdsize) {
+            @branchHint(.unlikely);
             p.fill();
             if (p.rdsize == 0) return 0;
         }
@@ -133,7 +133,7 @@ const Parser = struct {
     }
 
     fn stringContentSlow(p: *Parser, buf: []u8, head: u8, off: usize) []u8 {
-        @setCold(true);
+        @branchHint(.unlikely);
         var b = head;
         var n = off;
         while (true) {

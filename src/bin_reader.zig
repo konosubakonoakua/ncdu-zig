@@ -63,7 +63,7 @@ inline fn bigu32(v: [4]u8) u32 { return std.mem.bigToNative(u32, @bitCast(v)); }
 inline fn bigu64(v: [8]u8) u64 { return std.mem.bigToNative(u64, @bitCast(v)); }
 
 fn die() noreturn {
-    @setCold(true);
+    @branchHint(.cold);
     if (global.lastitem) |e| ui.die("Error reading item {x} from file\n", .{e})
     else ui.die("Error reading from file\n", .{});
 }
@@ -338,7 +338,7 @@ const ItemParser = struct {
     // Skips over any fields that don't fit into an ItemKey.
     fn next(r: *ItemParser) ?Field {
         while (r.key()) |k| {
-            if (k.major == .pos and k.arg <= std.math.maxInt(@typeInfo(ItemKey).Enum.tag_type)) return .{
+            if (k.major == .pos and k.arg <= std.math.maxInt(@typeInfo(ItemKey).@"enum".tag_type)) return .{
                 .key = @enumFromInt(k.arg),
                 .val = r.r.next(),
             } else {

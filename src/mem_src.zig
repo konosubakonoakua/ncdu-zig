@@ -56,7 +56,7 @@ fn rec(ctx: *Ctx, dir: *sink.Dir, entry: *model.Entry) void {
 pub fn run(d: *model.Dir) void {
     const sink_threads = sink.createThreads(1);
 
-    var ctx = .{
+    var ctx: Ctx = .{
         .sink = &sink_threads[0],
         .stat = toStat(&d.entry),
     };

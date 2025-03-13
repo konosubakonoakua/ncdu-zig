@@ -1,6 +1,12 @@
 # SPDX-FileCopyrightText: Yorhel <projects@yorhel.nl>
 # SPDX-License-Identifier: MIT
 
+2.8 - 2025-03-05
+	- Now requires Zig 0.14
+	- Add support for @-prefixed lines to ignore errors in config file
+	- List all supported options in `--help`
+	- Use `kB` instead of `KB` in `--si` mode
+
 2.7 - 2024-11-19
 	- Still requires Zig 0.12 or 0.13
 	- Support transparent reading/writing of zstandard-compressed JSON

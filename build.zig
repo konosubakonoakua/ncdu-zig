@@ -22,8 +22,8 @@ pub fn build(b: *std.Build) void {
     exe.pie = pie;
     exe.root_module.linkSystemLibrary("ncursesw", .{});
     exe.root_module.linkSystemLibrary("libzstd", .{});
-    // https://github.com/ziglang/zig/blob/b52be973dfb7d1408218b8e75800a2da3dc69108/build.zig#L551-L554
-    if (target.result.isDarwin()) {
+    // https://github.com/ziglang/zig/blob/faccd79ca5debbe22fe168193b8de54393257604/build.zig#L745-L748
+    if (target.result.os.tag.isDarwin()) {
         // useful for package maintainers
         exe.headerpad_max_install_names = true;
     }

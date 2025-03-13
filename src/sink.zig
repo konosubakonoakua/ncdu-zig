@@ -162,7 +162,7 @@ pub const Dir = struct {
 
     pub fn unref(d: *Dir, t: *Thread) void {
         if (d.refcnt.fetchSub(1, .release) != 1) return;
-        d.refcnt.fence(.acquire);
+        _ = d.refcnt.load(.acquire);
 
         switch (d.out) {
             .mem => |*m| m.final(if (d.parent) |p| &p.out.mem else null),
